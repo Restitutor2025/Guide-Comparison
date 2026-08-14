@@ -30,7 +30,7 @@ cd Guide-Comparison
 python run.py
 ```
 
-`run.py` checks for required modules before importing the application. Missing dependencies are installed from `requirements.txt` using the current Python interpreter.
+On the first launch, `run.py` creates a project-local `.venv`, restarts itself with that environment's Python interpreter, and installs missing dependencies from `requirements.txt`. Later launches reuse the same isolated environment automatically.
 
 ## Usage
 
@@ -60,7 +60,7 @@ Use **Swap OLD ↔ NEW** if the versions were reversed. **Clear** removes a docu
 Run the standard-library test suite:
 
 ```bash
-python -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 Tests cover insertion/deletion realignment, Korean numeric edits, inline differences, table row/cell changes, empty/merged-cell representations, DOCX XML order, PDF extraction, unsupported files, and corrupt documents.
