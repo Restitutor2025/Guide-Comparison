@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QStatusBar, QVBoxLayout, QWidget,
@@ -36,14 +36,47 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget(); root = QVBoxLayout(central)
         toolbar = QHBoxLayout()
+        left_controls = QWidget()
+        left_layout = QHBoxLayout(left_controls)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         self.compare_button = QPushButton("Compare")
         self.swap_button = QPushButton("Swap OLD ↔ NEW")
-        self.differences_button = QPushButton("Differences 0")
-        self.differences_button.setObjectName("differencesButton")
-        toolbar.addWidget(self.compare_button)
-        toolbar.addWidget(self.swap_button)
+        left_layout.addWidget(self.compare_button)
+        left_layout.addWidget(self.swap_button)
+
+        difference_controls = QWidget()
+        difference_layout = QVBoxLayout(difference_controls)
+        difference_layout.setContentsMargins(0, 0, 0, 0)
+        difference_layout.setSpacing(3)
+        self.differences_label = QLabel("Differences 0/0")
+        self.differences_label.setObjectName("differencesLabel")
+        self.differences_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        difference_layout.addWidget(self.differences_label)
+        difference_buttons = QHBoxLayout()
+        difference_buttons.setContentsMargins(0, 0, 0, 0)
+        difference_buttons.setSpacing(5)
+        self.previous_difference_button = QPushButton("↑")
+        self.previous_difference_button.setObjectName("differenceNavigationButton")
+        self.previous_difference_button.setToolTip("Previous changed page")
+        self.previous_difference_button.setAccessibleName("Previous changed page")
+        self.next_difference_button = QPushButton("↓")
+        self.next_difference_button.setObjectName("differenceNavigationButton")
+        self.next_difference_button.setToolTip("Next changed page")
+        self.next_difference_button.setAccessibleName("Next changed page")
+        for button in (self.previous_difference_button, self.next_difference_button):
+            button.setFixedSize(38, 28)
+            button.setEnabled(False)
+        difference_buttons.addWidget(self.previous_difference_button)
+        difference_buttons.addWidget(self.next_difference_button)
+        difference_layout.addLayout(difference_buttons)
+
+        right_balance = QWidget()
+        right_balance.setFixedWidth(left_controls.sizeHint().width())
+        toolbar.addWidget(left_controls)
         toolbar.addStretch(1)
-        toolbar.addWidget(self.differences_button)
+        toolbar.addWidget(difference_controls, 0, Qt.AlignmentFlag.AlignTop)
+        toolbar.addStretch(1)
+        toolbar.addWidget(right_balance)
         root.addLayout(toolbar)
         body = QHBoxLayout(); body.setSpacing(0)
         self.old_pane = DocumentPane("OLD")
@@ -63,7 +96,8 @@ class MainWindow(QMainWindow):
         self.new_pane.clearRequested.connect(lambda: self.clear_file("new"))
         self.swap_button.clicked.connect(self.swap_files)
         self.compare_button.clicked.connect(self.compare_requested)
-        self.differences_button.clicked.connect(self.show_next_difference)
+        self.previous_difference_button.clicked.connect(self.show_previous_difference)
+        self.next_difference_button.clicked.connect(self.show_next_difference)
 
     def select_file(self, side: str):
         filename, _ = QFileDialog.getOpenFileName(self, f"Select {side.upper()} document", "", "Documents (*.docx *.pdf)")
@@ -90,7 +124,7 @@ class MainWindow(QMainWindow):
         self.renderer.cancel_render()
         self.old_pane.clear_content(); self.new_pane.clear_content()
         self._difference_cursor = -1
-        self.differences_button.setText("Differences 0")
+        self._set_difference_controls("Differences 0/0", False)
 
     def swap_files(self):
         self.old_path, self.new_path = self.new_path, self.old_path
@@ -115,8 +149,7 @@ class MainWindow(QMainWindow):
         old_path, new_path = self.old_path, self.new_path
         self.renderer.cancel_render()
         self._difference_cursor = -1
-        self.differences_button.setText("Differences …")
-        self.differences_button.setEnabled(False)
+        self._set_difference_controls("Differences …", False)
         self._thread = QThread(self)
         self._worker = CompareWorker(old_path, new_path)
         self._worker.moveToThread(self._thread)
@@ -158,9 +191,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Limited text extraction", "\n\n".join(warnings))
 
     def _rendering_finished(self):
-        self._difference_cursor = -1
-        self.differences_button.setText(f"Differences {len(self.renderer.difference_targets)}")
-        self.differences_button.setEnabled(True)
+        target_count = len(self.renderer.difference_targets)
+        if target_count:
+            self._difference_cursor = 0
+            self._set_difference_controls(f"Differences 1/{target_count}", True)
+            self.renderer.navigate_difference(0)
+        else:
+            self._difference_cursor = -1
+            self._set_difference_controls("Differences 0/0", True)
         self.statusBar().showMessage("Comparison complete.", 5000)
         log.info("Comparison complete")
 
@@ -170,18 +208,38 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Comparison failed.")
         QMessageBox.critical(self, "Unable to compare documents", message)
 
-    def show_next_difference(self):
+    def _set_difference_controls(self, text: str, enabled: bool):
+        self.differences_label.setText(text)
+        self.previous_difference_button.setEnabled(enabled)
+        self.next_difference_button.setEnabled(enabled)
+
+    def _navigate_difference(self, index: int):
+        targets = self.renderer.difference_targets
+        self._difference_cursor = index % len(targets)
+        self.renderer.navigate_difference(self._difference_cursor)
+        self.differences_label.setText(
+            f"Differences {self._difference_cursor + 1}/{len(targets)}"
+        )
+
+    def _difference_targets_or_warn(self):
         targets = self.renderer.difference_targets
         if not targets:
             QMessageBox.information(self, "Differences", "변경점이 없습니다")
+            return None
+        return targets
+
+    def show_previous_difference(self):
+        targets = self._difference_targets_or_warn()
+        if targets is None:
             return
-        next_index = self._difference_cursor + 1
-        if next_index >= len(targets):
-            self.renderer.scroll_to_origin()
-            next_index = 0
-        self._difference_cursor = next_index
-        self.renderer.navigate_difference(next_index)
-        self.differences_button.setText(f"Differences {next_index + 1}/{len(targets)}")
+        previous_index = len(targets) - 1 if self._difference_cursor < 0 else self._difference_cursor - 1
+        self._navigate_difference(previous_index)
+
+    def show_next_difference(self):
+        targets = self._difference_targets_or_warn()
+        if targets is None:
+            return
+        self._navigate_difference(self._difference_cursor + 1)
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():

@@ -6,12 +6,13 @@ Guide Comparison is a local, deterministic desktop application for comparing an 
 
 - OLD/NEW drag and drop plus file-picker fallback
 - Original PDF/Word page layout instead of reconstructed text cards
+- Only pages containing detected differences are shown
 - Selection-like overlays: added (green), removed (red), and modified (yellow)
 - No virtual blank pages or placeholder cards for one-sided content
 - Lazy page rendering to keep long documents responsive
 - Independent hand-drag and wheel scrolling directly over either document page
 - Synchronized drag and wheel scrolling from page margins or the center gutter
-- Page-level `Differences` navigation, swap, clear, and file replacement
+- Centered `Differences X/Y` counter with separate previous/next navigation, swap, clear, and file replacement
 - Background parsing and comparison so the interface stays responsive
 - Read-only processing: input documents are never changed
 
@@ -20,7 +21,7 @@ Guide Comparison is a local, deterministic desktop application for comparing an 
 - PDF via `PyMuPDF`
 - DOCX rendered to PDF via LibreOffice, then processed with the same page pipeline
 
-Text extraction uses positional blocks so highlights can be drawn over their original page coordinates. LibreOffice is required for DOCX page rendering; its output is very close to Word but is not guaranteed to be pixel-identical to Microsoft Word.
+Text extraction uses positional blocks so highlights can be drawn over their original page coordinates. Adjacent non-table PDF blocks are merged into logical paragraphs for comparison while their original character coordinates are retained for precise highlights. LibreOffice is required for DOCX page rendering; its output is very close to Word but is not guaranteed to be pixel-identical to Microsoft Word.
 
 ## Installation and run
 
@@ -31,6 +32,30 @@ python run.py
 ```
 
 On the first launch, `run.py` creates a project-local `.venv`, restarts itself with that environment's Python interpreter, and installs missing dependencies from `requirements.txt`. Later launches reuse the same isolated environment automatically.
+
+## Windows installer
+
+`GuideComparisonSetup.exe` is an offline x64 installer for Windows 10 or newer. It installs the frozen application and, when LibreOffice is not already present, the bundled LibreOffice MSI used for DOCX page rendering. End users do not need Python, pip, a terminal, or an internet connection.
+
+Build it on an x64 Windows machine with Python and Inno Setup installed:
+
+```powershell
+.\packaging\build_windows.ps1
+```
+
+The output is `dist\installer\GuideComparisonSetup.exe`. The installer is intentionally large because it contains the complete LibreOffice Windows installer. The same build can be started manually with the **Build Windows Installer** GitHub Actions workflow.
+
+Before distributing the application, review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). In particular, PyMuPDF is AGPLv3 or commercially licensed, so distribution must comply with the AGPL or use an appropriate commercial license.
+
+## Self-contained macOS application
+
+With LibreOffice installed in `/Applications`, build a single Finder-visible app bundle with:
+
+```bash
+zsh packaging/build_macos.sh
+```
+
+The output is `executables/Guide Comparison.app`. The complete LibreOffice app is embedded inside the bundle so PDF and DOCX comparison work without a separate LibreOffice installation on the destination Mac. The local build is ad-hoc signed for testing; third-party distribution without Gatekeeper warnings requires Apple Developer ID signing and notarization.
 
 ## Usage
 
@@ -53,9 +78,9 @@ Use **Swap OLD ↔ NEW** if the versions were reversed. **Clear** removes a docu
 - Drag or wheel directly over an OLD page to move only OLD.
 - Drag or wheel directly over a NEW page to move only NEW.
 - Drag or wheel over the gray page margins or center gutter to move both sides.
-- Each **Differences** click moves to the next changed page from top to bottom.
+- Use the ↑/↓ buttons below **Differences** to move to the previous or next changed page.
 - Multiple highlights on the same page count as one difference target.
-- After the last changed page, the next click returns to the top and opens the first target again.
+- Navigation wraps between the first and last changed pages.
 
 ## Tests
 

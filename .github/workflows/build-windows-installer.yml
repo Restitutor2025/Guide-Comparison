@@ -1,0 +1,53 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches:
+      - codex/windows-installer
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: Application version
+        required: true
+        default: "1.0.0"
+      libreoffice_version:
+        description: LibreOffice stable version to bundle
+        required: true
+        default: "26.2.5"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      APP_VERSION: ${{ inputs.app_version || '1.0.0' }}
+      LIBREOFFICE_VERSION: ${{ inputs.libreoffice_version || '26.2.5' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: Build offline installer
+        shell: powershell
+        run: >-
+          .\packaging\build_windows.ps1
+          -Version "$env:APP_VERSION"
+          -LibreOfficeVersion "$env:LIBREOFFICE_VERSION"
+
+      - name: Upload GuideComparisonSetup.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: GuideComparisonSetup-${{ env.APP_VERSION }}-windows-x64
+          path: dist/installer/GuideComparisonSetup.exe
+          if-no-files-found: error
+          retention-days: 14

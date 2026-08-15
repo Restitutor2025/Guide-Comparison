@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -60,12 +61,29 @@ def _extract_docx_blocks(path: Path) -> list[TextBlock | TableBlock]:
 
 def _find_soffice() -> str | None:
     configured = os.environ.get("GUIDE_COMPARISON_SOFFICE")
-    candidates = (
+    candidates = [
         configured,
-        shutil.which("soffice"),
-        shutil.which("libreoffice"),
-        "/Applications/LibreOffice.app/Contents/MacOS/soffice",
-    )
+    ]
+    if getattr(sys, "frozen", False):
+        candidates.append(
+            str(
+                Path(sys.executable).resolve().parent.parent
+                / "Resources"
+                / "LibreOffice.app"
+                / "Contents"
+                / "MacOS"
+                / "soffice"
+            )
+        )
+    candidates.extend((shutil.which("soffice"), shutil.which("libreoffice")))
+    if sys.platform == "win32":
+        candidates.extend(
+            str(Path(program_files) / "LibreOffice" / "program" / "soffice.exe")
+            for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)")
+            if (program_files := os.environ.get(variable))
+        )
+    elif sys.platform == "darwin":
+        candidates.append("/Applications/LibreOffice.app/Contents/MacOS/soffice")
     return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), None)
 
 

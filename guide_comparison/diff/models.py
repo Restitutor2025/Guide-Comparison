@@ -19,6 +19,7 @@ class TextBlock:
     block_type: str = "paragraph"
     page: int | None = None
     rects: list[tuple[float, float, float, float]] = field(default_factory=list)
+    chars: list[tuple[str, float, float, float, float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -44,6 +45,7 @@ class ParsedDocument:
 class InlineChunk:
     text: str
     changed: bool = False
+    rects: list[tuple[float, float, float, float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

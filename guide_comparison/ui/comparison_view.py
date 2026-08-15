@@ -231,9 +231,14 @@ class ComparisonRenderer(QObject):
         self.new_source = PdfPageSource(new_path)
         self.old_highlights = self._collect_highlights(pairs, True, self.old_source)
         self.new_highlights = self._collect_highlights(pairs, False, self.new_source)
-        self.old_page_widgets = self._populate(self.old_pane, self.old_source, self.old_highlights)
-        self.new_page_widgets = self._populate(self.new_pane, self.new_source, self.new_highlights)
+        old_pages = self._target_page_indices(self.difference_targets, True)
+        new_pages = self._target_page_indices(self.difference_targets, False)
+        self.old_page_widgets = self._populate(self.old_pane, self.old_source, self.old_highlights, old_pages)
+        self.new_page_widgets = self._populate(self.new_pane, self.new_source, self.new_highlights, new_pages)
         self._resize_pages()
+        for pane in (self.old_pane, self.new_pane):
+            pane.content_layout.activate()
+            pane.content.adjustSize()
         QTimer.singleShot(0, self.renderingFinished.emit)
 
     def cancel_render(self):
@@ -252,9 +257,18 @@ class ComparisonRenderer(QObject):
         self.difference_targets = []
         self._pairs = []
 
-    def _populate(self, pane, source: PdfPageSource, highlights):
+    @staticmethod
+    def _target_page_indices(targets: list[DifferenceTarget], old_side: bool) -> list[int]:
+        """Return changed source pages in navigation order without duplicates."""
+        page_numbers = (
+            target.old_page if old_side else target.new_page
+            for target in targets
+        )
+        return list(dict.fromkeys(page - 1 for page in page_numbers if page is not None))
+
+    def _populate(self, pane, source: PdfPageSource, highlights, page_indices: list[int]):
         widgets = []
-        for page_index in range(len(source.page_sizes)):
+        for page_index in page_indices:
             widget = PageCanvas(source, page_index, highlights.get(page_index, []), pane.content)
             pane.content_layout.insertWidget(
                 pane.content_layout.count(),
@@ -277,11 +291,17 @@ class ComparisonRenderer(QObject):
             rects = list(block.rects)
             chunks = pair.old_inline if old_side else pair.new_inline
             if pair.status == DiffStatus.MODIFIED and chunks:
-                clip = _union_rect(block.rects)
-                changed_rects = []
-                for chunk in chunks:
-                    if chunk.changed and normalize_text(chunk.text):
-                        changed_rects.extend(source.search(block.page, chunk.text, clip))
+                changed_rects = [
+                    rect
+                    for chunk in chunks
+                    if chunk.changed
+                    for rect in chunk.rects
+                ]
+                if not changed_rects:
+                    clip = _union_rect(block.rects)
+                    for chunk in chunks:
+                        if chunk.changed and normalize_text(chunk.text):
+                            changed_rects.extend(source.search(block.page, chunk.text, clip))
                 if changed_rects:
                     rects = _deduplicate_rects(changed_rects)
 
@@ -388,6 +408,9 @@ class ComparisonRenderer(QObject):
             (self.new_pane, self.new_page_widgets, target.new_page),
         )
         for pane, widgets, page_number in targets:
-            if page_number and 0 < page_number <= len(widgets):
-                page_widget = widgets[page_number - 1]
+            page_widget = next(
+                (widget for widget in widgets if widget.page_index == page_number - 1),
+                None,
+            ) if page_number else None
+            if page_widget is not None:
                 pane.scroll.verticalScrollBar().setValue(max(0, page_widget.y() - 8))

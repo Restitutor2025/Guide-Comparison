@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 
 from .models import AlignedPair, DiffStatus, DocumentBlock, ParsedDocument, TableBlock, TextBlock
 from .table_diff import compare_tables
-from .text_diff import inline_diff, matching_text, normalize_text, similarity
+from .text_diff import inline_diff_blocks, matching_text, normalize_text, similarity
 
 
 MODIFIED_SIMILARITY_THRESHOLD = 0.55
@@ -41,7 +41,7 @@ def _pair_modified(old: DocumentBlock, new: DocumentBlock) -> AlignedPair:
     if isinstance(old, TableBlock) and isinstance(new, TableBlock):
         pair.table_rows = compare_tables(old, new)
     elif isinstance(old, TextBlock) and isinstance(new, TextBlock):
-        pair.old_inline, pair.new_inline = inline_diff(old.text, new.text)
+        pair.old_inline, pair.new_inline = inline_diff_blocks(old, new)
     return pair
 
 

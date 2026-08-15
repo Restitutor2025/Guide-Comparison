@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -19,7 +21,8 @@ QFrame#dropArea { background: #fafbfd; border: 2px dashed #aab5c1; border-radius
 QFrame#dropArea:hover { background: #eef6ff; border-color: #4f8fcf; }
 QLabel#paneTitle { font-size: 17px; font-weight: 700; padding: 8px; }
 QLabel#fileInfo { color: #536170; }
-QPushButton#differencesButton { font-weight: 700; }
+QLabel#differencesLabel { font-weight: 700; }
+QPushButton#differenceNavigationButton { font-size: 16px; font-weight: 700; padding: 0; }
 QFrame#syncGutter { background: #d8dee5; border-left: 1px solid #b9c2cc; border-right: 1px solid #b9c2cc; }
 QWidget#pageStack { background: #dfe3e8; }
 QScrollBar:vertical { width: 11px; background: #edf0f3; }
@@ -28,10 +31,21 @@ QScrollBar::handle:vertical { background: #aeb8c2; border-radius: 5px; min-heigh
 
 
 def configure_logging() -> None:
+    if os.name == "nt":
+        base_dir = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "GuideComparison"
+    elif sys.platform == "darwin":
+        base_dir = Path.home() / "Library" / "Logs" / "GuideComparison"
+    else:
+        base_dir = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "guide-comparison"
+    try:
+        base_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        base_dir = Path(tempfile.gettempdir()) / "guide-comparison"
+        base_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.FileHandler(Path.cwd() / "guide_comparison.log", encoding="utf-8"), logging.StreamHandler()],
+        handlers=[logging.FileHandler(base_dir / "guide_comparison.log", encoding="utf-8"), logging.StreamHandler()],
     )
 
 

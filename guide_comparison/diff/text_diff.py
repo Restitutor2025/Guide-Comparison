@@ -5,7 +5,7 @@ import unicodedata
 from collections import Counter
 from difflib import SequenceMatcher
 
-from .models import InlineChunk
+from .models import InlineChunk, TextBlock
 
 
 _WHITESPACE = re.compile(r"\s+")
@@ -61,11 +61,63 @@ def inline_diff(old: str, new: str) -> tuple[list[InlineChunk], list[InlineChunk
     return _coalesce(old_result), _coalesce(new_result)
 
 
+def _character_units(block: TextBlock):
+    units = []
+    for char in block.chars:
+        key = matching_text(char[0])
+        if key:
+            units.append((key, char))
+    return units
+
+
+def _character_rects(chars) -> list[tuple[float, float, float, float]]:
+    rects: list[list[float]] = []
+    for _value, x0, y0, x1, y1 in chars:
+        if rects:
+            previous = rects[-1]
+            height = max(previous[3] - previous[1], y1 - y0, 1.0)
+            same_line = abs(((previous[1] + previous[3]) / 2) - ((y0 + y1) / 2)) <= height * 0.35
+            if same_line and x0 - previous[2] <= height * 0.65:
+                previous[0] = min(previous[0], x0)
+                previous[1] = min(previous[1], y0)
+                previous[2] = max(previous[2], x1)
+                previous[3] = max(previous[3], y1)
+                continue
+        rects.append([x0, y0, x1, y1])
+    return [tuple(rect) for rect in rects]
+
+
+def inline_diff_blocks(old: TextBlock, new: TextBlock) -> tuple[list[InlineChunk], list[InlineChunk]]:
+    """Compare merged paragraph characters while retaining original PDF rectangles."""
+    old_units, new_units = _character_units(old), _character_units(new)
+    if not old_units or not new_units:
+        return inline_diff(old.text, new.text)
+
+    matcher = SequenceMatcher(
+        None,
+        [key for key, _char in old_units],
+        [key for key, _char in new_units],
+        autojunk=False,
+    )
+    old_result: list[InlineChunk] = []
+    new_result: list[InlineChunk] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        changed = tag != "equal"
+        if i1 != i2:
+            chars = [char for _key, char in old_units[i1:i2]]
+            old_result.append(InlineChunk("".join(char[0] for char in chars), changed, _character_rects(chars)))
+        if j1 != j2:
+            chars = [char for _key, char in new_units[j1:j2]]
+            new_result.append(InlineChunk("".join(char[0] for char in chars), changed, _character_rects(chars)))
+    return _coalesce(old_result), _coalesce(new_result)
+
+
 def _coalesce(chunks: list[InlineChunk]) -> list[InlineChunk]:
     result: list[InlineChunk] = []
     for chunk in chunks:
         if chunk.text and result and result[-1].changed == chunk.changed:
             result[-1].text += chunk.text
+            result[-1].rects.extend(chunk.rects)
         elif chunk.text:
             result.append(chunk)
     return result

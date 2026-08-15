@@ -44,6 +44,26 @@ class ParserTests(unittest.TestCase):
             self.assertEqual(parsed.render_path, path)
             self.assertTrue(next(b for b in parsed.blocks if b.text == "Guide paragraph").rects)
 
+    def test_pdf_merges_wrapped_lines_but_keeps_separate_paragraphs(self):
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            self.skipTest("PyMuPDF unavailable")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "wrapped.pdf"
+            doc = fitz.open(); page = doc.new_page()
+            page.insert_text((72, 72), "First paragraph continues")
+            page.insert_text((72, 86), "and ends here.")
+            page.insert_text((72, 125), "Separate paragraph.")
+            doc.save(path); doc.close()
+            parsed = parse_document(path)
+            self.assertEqual([block.text for block in parsed.blocks], [
+                "First paragraph continues and ends here.",
+                "Separate paragraph.",
+            ])
+            self.assertEqual(len(parsed.blocks[0].rects), 2)
+            self.assertTrue(parsed.blocks[0].chars)
+
     def test_corrupt_files_are_wrapped(self):
         with tempfile.TemporaryDirectory() as folder:
             for suffix in (".pdf", ".docx"):
