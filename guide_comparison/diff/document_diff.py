@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 
 from .models import AlignedPair, DiffStatus, DocumentBlock, ParsedDocument, TableBlock, TextBlock
 from .table_diff import compare_tables
-from .text_diff import inline_diff, normalize_text, similarity
+from .text_diff import inline_diff, matching_text, normalize_text, similarity
 
 
 MODIFIED_SIMILARITY_THRESHOLD = 0.55
@@ -13,7 +13,7 @@ MODIFIED_SIMILARITY_THRESHOLD = 0.55
 def block_key(block: DocumentBlock) -> str:
     if isinstance(block, TableBlock):
         return "\n".join(" | ".join(normalize_text(c) for c in row) for row in block.rows)
-    return normalize_text(block.text)
+    return matching_text(block.text)
 
 
 def compare_documents(old: ParsedDocument, new: ParsedDocument) -> list[AlignedPair]:

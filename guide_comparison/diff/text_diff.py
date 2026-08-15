@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+from collections import Counter
 from difflib import SequenceMatcher
 
 from .models import InlineChunk
 
 
 _WHITESPACE = re.compile(r"\s+")
+_MATCH_SPACE = re.compile(r"\s+")
+_WORD = re.compile(r"[0-9]+|[^\W\d_]+", re.UNICODE)
+_PUNCTUATION = str.maketrans({
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "‐": "-", "‑": "-", "–": "-", "—": "-",
+    "ㆍ": "·", "‧": "·", "•": "·", "●": "·", "○": "·",
+})
 # Keep digit runs separate from words so changes such as Korean "30일" -> "40일"
 # highlight the value rather than the unchanged suffix.
 _TOKEN = re.compile(r"\s+|[0-9]+|[^\W\d_]+|_+|[^\w\s]", re.UNICODE)
@@ -17,8 +26,26 @@ def normalize_text(text: str) -> str:
     return _WHITESPACE.sub(" ", text.replace("\r\n", "\n").replace("\r", "\n")).strip()
 
 
+def matching_text(text: str) -> str:
+    """Canonical form used for matching, without changing displayed source text."""
+    canonical = unicodedata.normalize("NFKC", normalize_text(text)).translate(_PUNCTUATION).casefold()
+    # PDF and Word line layout frequently inserts or removes spaces around Korean/Latin text.
+    return _MATCH_SPACE.sub("", canonical)
+
+
+def _token_overlap(old: str, new: str) -> float:
+    old_tokens = Counter(_WORD.findall(unicodedata.normalize("NFKC", normalize_text(old)).casefold()))
+    new_tokens = Counter(_WORD.findall(unicodedata.normalize("NFKC", normalize_text(new)).casefold()))
+    total = sum(old_tokens.values()) + sum(new_tokens.values())
+    return 2 * sum((old_tokens & new_tokens).values()) / total if total else 1.0
+
+
 def similarity(old: str, new: str) -> float:
-    return SequenceMatcher(None, normalize_text(old), normalize_text(new), autojunk=False).ratio()
+    old_key, new_key = matching_text(old), matching_text(new)
+    if old_key == new_key:
+        return 1.0
+    character_score = SequenceMatcher(None, old_key, new_key, autojunk=False).ratio()
+    return 0.82 * character_score + 0.18 * _token_overlap(old, new)
 
 
 def inline_diff(old: str, new: str) -> tuple[list[InlineChunk], list[InlineChunk]]:

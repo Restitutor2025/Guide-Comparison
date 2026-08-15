@@ -33,4 +33,9 @@ class DropArea(QFrame):
 
     def set_file(self, path: Path | None):
         self.label.setText(path.name if path else f"Drag {self.role.lower()} document here")
-
+        if path:
+            self.setMinimumHeight(38)
+            self.setMaximumHeight(38)
+        else:
+            self.setMinimumHeight(80)
+            self.setMaximumHeight(16777215)

@@ -35,7 +35,7 @@ def _type_for(text: str, size: float, median_size: float) -> str:
     return "paragraph"
 
 
-def parse_pdf(path: Path) -> ParsedDocument:
+def parse_pdf(path: Path, *, source_path: Path | None = None) -> ParsedDocument:
     try:
         document = fitz.open(path)
     except Exception as exc:
@@ -43,7 +43,7 @@ def parse_pdf(path: Path) -> ParsedDocument:
     try:
         if document.needs_pass:
             raise DocumentParseError("This PDF is encrypted. Password-protected PDFs are not supported.")
-        page_items: list[list[tuple[str, float, float]]] = []
+        page_items: list[list[tuple[str, float, float, list[tuple[float, float, float, float]]]]] = []
         edge_candidates: list[str] = []
         sizes: list[float] = []
         for page in document:
@@ -54,27 +54,36 @@ def parse_pdf(path: Path) -> ParsedDocument:
                     continue
                 lines = []
                 block_sizes = []
+                line_rects: list[tuple[float, float, float, float]] = []
                 for line in block.get("lines", []):
                     text = "".join(span.get("text", "") for span in line.get("spans", []))
                     if text.strip():
                         lines.append(text)
                         block_sizes.extend(float(span.get("size", 10)) for span in line.get("spans", []))
+                        bbox = line.get("bbox")
+                        if bbox and len(bbox) == 4:
+                            line_rects.append(tuple(float(value) for value in bbox))
                 text = _normalize_lines("\n".join(lines))
                 if not text or _PAGE_NUMBER.match(text):
                     continue
                 y = float(block.get("bbox", (0, 0, 0, 0))[1])
                 size = sum(block_sizes) / len(block_sizes) if block_sizes else 10.0
-                entries.append((text, y, size)); sizes.append(size)
+                entries.append((text, y, size, line_rects)); sizes.append(size)
                 if y < page.rect.height * 0.12 or y > page.rect.height * 0.88:
                     edge_candidates.append(text)
             page_items.append(entries)
         repeated = {text for text, count in Counter(edge_candidates).items() if count >= max(2, len(document) // 2)}
         median = sorted(sizes)[len(sizes) // 2] if sizes else 10.0
-        blocks = [TextBlock(text, _type_for(text, size, median), page_no) for page_no, entries in enumerate(page_items, 1) for text, _y, size in entries if text not in repeated]
+        blocks = [
+            TextBlock(text, _type_for(text, size, median), page_no, rects)
+            for page_no, entries in enumerate(page_items, 1)
+            for text, _y, size, rects in entries
+            if text not in repeated
+        ]
         warning = None
         extracted = sum(len(block.text) for block in blocks)
         if len(document) and extracted < max(20, len(document) * 8):
             warning = "This PDF appears to contain little or no extractable text.\n\nScanned PDF OCR is not supported in this version."
-        return ParsedDocument(path, blocks, len(document), warning)
+        return ParsedDocument(source_path or path, blocks, len(document), warning, path)
     finally:
         document.close()

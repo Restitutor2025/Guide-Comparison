@@ -18,6 +18,7 @@ class TextBlock:
     text: str
     block_type: str = "paragraph"
     page: int | None = None
+    rects: list[tuple[float, float, float, float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -36,6 +37,7 @@ class ParsedDocument:
     blocks: list[DocumentBlock]
     page_count: int | None = None
     warning: str | None = None
+    render_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -61,4 +63,3 @@ class AlignedPair:
     old_inline: list[InlineChunk] = field(default_factory=list)
     new_inline: list[InlineChunk] = field(default_factory=list)
     table_rows: list[AlignedRow] = field(default_factory=list)
-

@@ -8,10 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx import Document
+import pymupdf as fitz
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from guide_comparison.diff.models import AlignedPair, DiffStatus, InlineChunk, ParsedDocument, TextBlock
+from guide_comparison.diff.document_diff import compare_documents
+from guide_comparison.parsers import parse_document
 from guide_comparison.ui.main_window import MainWindow
 
 
@@ -29,39 +33,121 @@ class UiIntegrationTests(unittest.TestCase):
             QTest.qWait(10)
         return False
 
+    @staticmethod
+    def make_pdf(path: Path, lines: list[str]):
+        document = fitz.open()
+        page = document.new_page()
+        for index, line in enumerate(lines):
+            page.insert_text((72, 72 + index * 28), line)
+        document.save(path)
+        document.close()
+
+    @staticmethod
+    def make_multipage_pdf(path: Path, pages: int):
+        document = fitz.open()
+        for page_number in range(1, pages + 1):
+            page = document.new_page()
+            page.insert_text((72, 72), f"Page {page_number}")
+        document.save(path)
+        document.close()
+
     def test_background_comparison_reaches_the_ui(self):
         with tempfile.TemporaryDirectory() as folder:
-            old_path, new_path = Path(folder) / "old.docx", Path(folder) / "new.docx"
-            old_doc = Document(); old_doc.add_paragraph("평가 기간은 30일입니다."); old_doc.save(old_path)
-            new_doc = Document(); new_doc.add_paragraph("평가 기간은 40일입니다."); new_doc.save(new_path)
+            old_path, new_path = Path(folder) / "old.pdf", Path(folder) / "new.pdf"
+            self.make_pdf(old_path, ["Evaluation period is 30 days."])
+            self.make_pdf(new_path, ["Evaluation period is 40 days."])
             window = MainWindow(); window.show()
             window.set_file("old", old_path); window.set_file("new", new_path)
             self.assertIsNotNone(window._worker)
             self.assertTrue(self.wait_until(lambda: window._thread is None and window.statusBar().currentMessage() == "Comparison complete."))
-            self.assertEqual(window.summary.text(), "Added: 0    Removed: 0    Modified: 1")
-            self.assertEqual(len(window.renderer.change_positions), 1)
+            self.assertEqual(window.differences_button.text(), "Differences 1")
+            self.assertEqual(len(window.renderer.difference_targets), 1)
             window.close()
 
-    def test_wrapped_pair_heights_stay_aligned_after_resize(self):
-        short = "OLD short sentence 30 days."
-        long = ("NEW much longer sentence with many words " * 35) + "40 days."
+    def test_original_pages_render_without_blank_counterparts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_path, new_path = Path(folder) / "old.pdf", Path(folder) / "new.pdf"
+            self.make_pdf(old_path, ["Keep"])
+            self.make_pdf(new_path, ["Keep", "New content"])
+            old, new = parse_document(old_path), parse_document(new_path)
+            pairs = compare_documents(old, new)
+
+            window = MainWindow(); window.resize(1500, 700); window.show()
+            finished = []
+            window.renderer.renderingFinished.connect(lambda: finished.append(True))
+            window.renderer.render(old, new, pairs)
+            self.assertTrue(self.wait_until(lambda: bool(finished)))
+            self.assertEqual(len(window.renderer.old_page_widgets), 1)
+            self.assertEqual(len(window.renderer.new_page_widgets), 1)
+            self.assertEqual(sum(map(len, window.renderer.old_highlights.values())), 0)
+            self.assertGreater(sum(map(len, window.renderer.new_highlights.values())), 0)
+            self.assertEqual(len(window.renderer.difference_targets), 1)
+
+            old_page = window.renderer.old_page_widgets[0]
+            point_on_page = window.old_pane.scroll.viewport().mapFromGlobal(
+                old_page.mapToGlobal(old_page.rect().center())
+            )
+            self.assertTrue(window.old_pane.scroll._over_document_page(point_on_page))
+            self.assertFalse(window.old_pane.scroll._over_document_page(old_page.pos() - old_page.pos()))
+            window.close()
+
+    def test_difference_targets_group_changes_by_page(self):
         pairs = [
-            AlignedPair(TextBlock("A"), TextBlock("A"), DiffStatus.UNCHANGED),
-            AlignedPair(TextBlock(short), TextBlock(long), DiffStatus.MODIFIED, [InlineChunk(short, True)], [InlineChunk(long, True)]),
-            AlignedPair(TextBlock("TAIL"), TextBlock("TAIL"), DiffStatus.UNCHANGED),
+            AlignedPair(TextBlock("A", page=1), TextBlock("B", page=1), DiffStatus.MODIFIED),
+            AlignedPair(TextBlock("C", page=1), TextBlock("D", page=1), DiffStatus.MODIFIED),
+            AlignedPair(None, TextBlock("Added", page=2), DiffStatus.ADDED),
+            AlignedPair(TextBlock("Removed", page=3), None, DiffStatus.REMOVED),
         ]
-        window = MainWindow(); window.resize(1600, 700); window.show()
-        finished = []
-        window.renderer.renderingFinished.connect(lambda: finished.append(True))
-        window.renderer.render(pairs)
-        self.assertTrue(self.wait_until(lambda: bool(finished)))
-        sync_token = window.renderer._height_sync_token
-        window.resize(700, 500)
-        self.assertTrue(self.wait_until(lambda: window.renderer._height_sync_token > sync_token and window.renderer._height_sync_index == len(window.renderer._pair_widgets)))
-        for old_widget, new_widget in window.renderer._pair_widgets:
-            self.assertEqual(old_widget.height(), new_widget.height())
-            self.assertEqual(old_widget.y(), new_widget.y())
+        window = MainWindow()
+        targets = window.renderer._build_difference_targets(pairs)
+        self.assertEqual([(target.old_page, target.new_page) for target in targets], [(1, 1), (None, 2), (3, None)])
         window.close()
+
+    def test_differences_button_wraps_and_empty_result_shows_message(self):
+        window = MainWindow(); window.show()
+        with patch.object(QMessageBox, "information") as information:
+            window.show_next_difference()
+            information.assert_called_once_with(window, "Differences", "변경점이 없습니다")
+
+        window.renderer.difference_targets = [
+            window.renderer._build_difference_targets([
+                AlignedPair(TextBlock("A", page=1), TextBlock("B", page=1), DiffStatus.MODIFIED)
+            ])[0]
+        ]
+        window._difference_cursor = 0
+        window.show_next_difference()
+        self.assertEqual(window._difference_cursor, 0)
+        self.assertEqual(window.differences_button.text(), "Differences 1/1")
+        window.close()
+
+    def test_page_drag_is_independent_and_margin_drag_is_synchronized(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_path, new_path = Path(folder) / "old.pdf", Path(folder) / "new.pdf"
+            self.make_multipage_pdf(old_path, 3)
+            self.make_multipage_pdf(new_path, 3)
+            old, new = parse_document(old_path), parse_document(new_path)
+            window = MainWindow(); window.resize(1200, 700); window.show()
+            window.renderer.render(old, new, compare_documents(old, new))
+            QTest.qWait(50)
+
+            old_scroll, new_scroll = window.old_pane.scroll, window.new_pane.scroll
+            old_scroll.verticalScrollBar().setValue(200)
+            new_scroll.verticalScrollBar().setValue(200)
+            page = window.renderer.old_page_widgets[0]
+            center = page.rect().center()
+            QTest.mousePress(page, Qt.MouseButton.LeftButton, pos=center)
+            QTest.mouseMove(page, center + QPoint(0, -50), 20)
+            QTest.mouseRelease(page, Qt.MouseButton.LeftButton, pos=center + QPoint(0, -50))
+            self.assertEqual(old_scroll.verticalScrollBar().value(), 250)
+            self.assertEqual(new_scroll.verticalScrollBar().value(), 200)
+
+            margin = QPoint(2, 100)
+            QTest.mousePress(old_scroll.viewport(), Qt.MouseButton.LeftButton, pos=margin)
+            QTest.mouseMove(old_scroll.viewport(), margin + QPoint(0, -50), 20)
+            QTest.mouseRelease(old_scroll.viewport(), Qt.MouseButton.LeftButton, pos=margin + QPoint(0, -50))
+            self.assertEqual(old_scroll.verticalScrollBar().value(), 300)
+            self.assertEqual(new_scroll.verticalScrollBar().value(), 250)
+            window.close()
 
     def test_close_waits_for_running_worker(self):
         def slow_parse(path):

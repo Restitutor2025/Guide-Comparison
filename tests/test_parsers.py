@@ -4,6 +4,7 @@ from pathlib import Path
 
 from guide_comparison.diff.models import TableBlock, TextBlock
 from guide_comparison.parsers import DocumentParseError, parse_document
+from guide_comparison.parsers.docx_parser import _extract_docx_blocks
 
 
 class ParserTests(unittest.TestCase):
@@ -22,8 +23,12 @@ class ParserTests(unittest.TestCase):
             path = Path(folder) / "order.docx"
             doc = Document(); doc.add_paragraph("Before"); table = doc.add_table(rows=1, cols=2)
             table.cell(0, 0).text = "A"; table.cell(0, 1).text = "B"; doc.add_paragraph("After"); doc.save(path)
+            source_blocks = _extract_docx_blocks(path)
+            self.assertEqual([type(b) for b in source_blocks], [TextBlock, TableBlock, TextBlock])
             parsed = parse_document(path)
-            self.assertEqual([type(b) for b in parsed.blocks], [TextBlock, TableBlock, TextBlock])
+            self.assertEqual(parsed.page_count, 1)
+            self.assertTrue(parsed.render_path and parsed.render_path.is_file())
+            self.assertIn("Before", " ".join(block.text for block in parsed.blocks))
 
     def test_pdf_page_count_and_text(self):
         try:
@@ -36,6 +41,8 @@ class ParserTests(unittest.TestCase):
             parsed = parse_document(path)
             self.assertEqual(parsed.page_count, 1)
             self.assertIn("Guide paragraph", [b.text for b in parsed.blocks])
+            self.assertEqual(parsed.render_path, path)
+            self.assertTrue(next(b for b in parsed.blocks if b.text == "Guide paragraph").rects)
 
     def test_corrupt_files_are_wrapped(self):
         with tempfile.TemporaryDirectory() as folder:

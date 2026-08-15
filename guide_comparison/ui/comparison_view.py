@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-import html
+from collections import Counter, OrderedDict, defaultdict
+from dataclasses import dataclass
+from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Signal, Qt
-from PySide6.QtGui import QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QFrame, QLabel, QScrollBar, QSizePolicy, QVBoxLayout, QWidget
+import pymupdf as fitz
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QTimer, Signal, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
+from PySide6.QtWidgets import QFrame, QScrollBar, QWidget
 
-from guide_comparison.diff.models import AlignedPair, DiffStatus, TableBlock, TextBlock
+from guide_comparison.diff.models import AlignedPair, DiffStatus, ParsedDocument, TextBlock
+from guide_comparison.diff.text_diff import normalize_text
 
 
-COLORS = {
-    DiffStatus.ADDED: ("#e7f7ec", "#218a42"),
-    DiffStatus.REMOVED: ("#fdeaea", "#c2362b"),
-    DiffStatus.MODIFIED: ("#fff6d8", "#b37b00"),
-    DiffStatus.UNCHANGED: ("#ffffff", "#d7dce2"),
+HIGHLIGHT_COLORS = {
+    DiffStatus.ADDED: QColor(79, 207, 126, 105),
+    DiffStatus.REMOVED: QColor(255, 104, 104, 100),
+    DiffStatus.MODIFIED: QColor(255, 210, 52, 135),
 }
 
 
@@ -32,195 +35,359 @@ class SyncGutter(QFrame):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True; self._last = event.position().toPoint(); event.accept()
+            self._dragging = True
+            self._last = event.position().toPoint()
+            event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._dragging:
             point = event.position().toPoint()
             self.deltaDragged.emit(-(point.y() - self._last.y()))
-            self._last = point; event.accept()
+            self._last = point
+            event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        self._dragging = False; event.accept()
+        self._dragging = False
+        event.accept()
 
     def wheelEvent(self, event: QWheelEvent):
-        self.wheelDelta.emit(-event.angleDelta().y()); event.accept()
+        self.wheelDelta.emit(-event.angleDelta().y())
+        event.accept()
 
 
-def _inline_html(chunks) -> str:
-    return "".join(
-        f'<span style="background:#f3c969;font-weight:600">{html.escape(chunk.text)}</span>' if chunk.changed else html.escape(chunk.text)
-        for chunk in chunks
+@dataclass(frozen=True, slots=True)
+class PageHighlight:
+    rect: tuple[float, float, float, float]
+    status: DiffStatus
+
+
+@dataclass(frozen=True, slots=True)
+class DifferenceTarget:
+    old_page: int | None
+    new_page: int | None
+
+
+class PdfPageSource:
+    """Lazily render PDF pages and keep a small in-memory pixmap cache."""
+
+    CACHE_LIMIT = 10
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.document = fitz.open(path)
+        self.page_sizes = [
+            (float(self.document[index].rect.width), float(self.document[index].rect.height))
+            for index in range(len(self.document))
+        ]
+        self._cache: OrderedDict[tuple[int, int], QPixmap] = OrderedDict()
+
+    def close(self):
+        self._cache.clear()
+        if self.document:
+            self.document.close()
+            self.document = None
+
+    def pixmap(self, page_index: int, display_width: int) -> QPixmap:
+        key = (page_index, display_width)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return cached
+
+        page_width, _ = self.page_sizes[page_index]
+        scale = max(0.1, display_width / page_width)
+        pixmap = self.document[page_index].get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        image = QImage(
+            pixmap.samples,
+            pixmap.width,
+            pixmap.height,
+            pixmap.stride,
+            QImage.Format.Format_RGB888,
+        ).copy()
+        rendered = QPixmap.fromImage(image)
+        self._cache[key] = rendered
+        while len(self._cache) > self.CACHE_LIMIT:
+            self._cache.popitem(last=False)
+        return rendered
+
+    def search(self, page_number: int, text: str, clip: tuple[float, float, float, float] | None):
+        if not self.document or not 1 <= page_number <= len(self.document) or not normalize_text(text):
+            return []
+        page = self.document[page_number - 1]
+        area = fitz.Rect(clip) if clip else None
+        return [tuple(float(value) for value in rect) for rect in page.search_for(text.strip(), clip=area)]
+
+
+class PageCanvas(QWidget):
+    """A rendered source page with translucent, selection-like highlights."""
+
+    def __init__(self, source: PdfPageSource, page_index: int, highlights: list[PageHighlight], parent=None):
+        super().__init__(parent)
+        self.source: PdfPageSource | None = source
+        self.page_index = page_index
+        self.highlights = highlights
+        self.display_width = 500
+        self.setProperty("documentPage", True)
+        self.setToolTip(f"Page {page_index + 1}")
+        self.set_display_width(self.display_width)
+
+    def detach(self):
+        self.source = None
+
+    def set_display_width(self, width: int):
+        if not self.source:
+            return
+        width = max(220, int(width))
+        page_width, page_height = self.source.page_sizes[self.page_index]
+        self.display_width = width
+        self.setFixedSize(width, max(1, round(width * page_height / page_width)))
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.source:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawPixmap(self.rect(), self.source.pixmap(self.page_index, self.display_width))
+
+        page_width, page_height = self.source.page_sizes[self.page_index]
+        x_scale = self.width() / page_width
+        y_scale = self.height() / page_height
+        painter.setPen(Qt.PenStyle.NoPen)
+        for highlight in self.highlights:
+            x0, y0, x1, y1 = highlight.rect
+            rect = QRectF(
+                x0 * x_scale,
+                max(0.0, y0 * y_scale - 1.5),
+                max(1.0, (x1 - x0) * x_scale),
+                max(2.0, (y1 - y0) * y_scale + 3.0),
+            )
+            painter.fillRect(rect, HIGHLIGHT_COLORS[highlight.status])
+
+        painter.setPen(QPen(QColor("#aeb6c0"), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+
+def _union_rect(rects: list[tuple[float, float, float, float]]):
+    if not rects:
+        return None
+    return (
+        min(rect[0] for rect in rects),
+        min(rect[1] for rect in rects),
+        max(rect[2] for rect in rects),
+        max(rect[3] for rect in rects),
     )
 
 
-def _block_text(block) -> str:
-    if isinstance(block, TextBlock):
-        return block.text
-    if isinstance(block, TableBlock):
-        return "\n".join("  |  ".join(row) for row in block.rows)
-    return ""
-
-
-def make_block_widget(pair: AlignedPair, old_side: bool) -> QFrame:
-    frame = QFrame()
-    frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-    frame.setObjectName("comparisonBlock")
-    status = pair.status
-    bg, border = COLORS[status]
-    frame.setStyleSheet(f"QFrame#comparisonBlock {{background:{bg}; border-left:4px solid {border}; border-radius:4px;}}")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(10, 8, 10, 8)
-    block = pair.old_block if old_side else pair.new_block
-    if block is None:
-        label = QLabel("")
-        label.setMinimumHeight(18)
-    elif isinstance(block, TableBlock) and pair.table_rows:
-        rows = []
-        for row in pair.table_rows:
-            cells = row.old_cells if old_side else row.new_cells
-            if cells is None:
-                rows.append("&nbsp;")
-                continue
-            changed = row.changed_old_cells if old_side else row.changed_new_cells
-            rendered = [f'<span style="background:#f3c969;font-weight:600">{html.escape(cell)}</span>' if i in changed else html.escape(cell) for i, cell in enumerate(cells)]
-            rows.append(" &nbsp;|&nbsp; ".join(rendered))
-        label = QLabel("<br>".join(rows))
-        label.setTextFormat(Qt.TextFormat.RichText)
-    elif status == DiffStatus.MODIFIED and (pair.old_inline if old_side else pair.new_inline):
-        label = QLabel(_inline_html(pair.old_inline if old_side else pair.new_inline))
-        label.setTextFormat(Qt.TextFormat.RichText)
-    else:
-        label = QLabel(html.escape(_block_text(block)).replace("\n", "<br>"))
-        label.setTextFormat(Qt.TextFormat.RichText)
-    label.setWordWrap(True)
-    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-    layout.addWidget(label)
-    if status != DiffStatus.UNCHANGED:
-        badge = QLabel(status.value)
-        badge.setStyleSheet(f"color:{border}; font-size:10px; font-weight:700; border:none; background:transparent")
-        layout.addWidget(badge)
-    return frame
+def _deduplicate_rects(rects):
+    seen = set()
+    result = []
+    for rect in rects:
+        key = tuple(round(value, 2) for value in rect)
+        if key not in seen:
+            seen.add(key)
+            result.append(tuple(float(value) for value in rect))
+    return result
 
 
 class ComparisonRenderer(QObject):
-    """Renders both sides in lockstep and keeps corresponding rows equal-height."""
+    """Render original pages independently and overlay comparison highlights."""
 
     renderingFinished = Signal()
-    BATCH_SIZE = 24
-    HEIGHT_BATCH_SIZE = 80
 
     def __init__(self, old_pane, new_pane, gutter: SyncGutter):
         super().__init__(old_pane)
         self.old_pane, self.new_pane, self.gutter = old_pane, new_pane, gutter
+        self.old_source: PdfPageSource | None = None
+        self.new_source: PdfPageSource | None = None
+        self.old_page_widgets: list[PageCanvas] = []
+        self.new_page_widgets: list[PageCanvas] = []
+        self.old_highlights: dict[int, list[PageHighlight]] = {}
+        self.new_highlights: dict[int, list[PageHighlight]] = {}
+        self.difference_targets: list[DifferenceTarget] = []
+        self._pairs: list[AlignedPair] = []
+        self._resize_pending = False
+
         gutter.deltaDragged.connect(self.scroll_both)
         gutter.wheelDelta.connect(lambda delta: self.scroll_both(int(delta / 2)))
-        self.change_positions: list[int] = []
-        self._pairs: list[AlignedPair] = []
-        self._pair_widgets: list[tuple[QFrame, QFrame]] = []
-        self._render_index = 0
-        self._generation = 0
-        self._height_sync_pending = False
-        self._height_sync_token = 0
-        self._height_sync_index = 0
-        self._rendering = False
+        old_pane.scroll.syncScrollRequested.connect(self.scroll_both)
+        new_pane.scroll.syncScrollRequested.connect(self.scroll_both)
         old_pane.scroll.viewport().installEventFilter(self)
         new_pane.scroll.viewport().installEventFilter(self)
 
-    def render(self, pairs: list[AlignedPair]):
-        self._generation += 1
-        generation = self._generation
-        self.old_pane.clear_content(); self.new_pane.clear_content()
-        self.change_positions = []
+    def render(self, old: ParsedDocument, new: ParsedDocument, pairs: list[AlignedPair]):
+        self.cancel_render()
+        self.old_pane.clear_content()
+        self.new_pane.clear_content()
         self._pairs = pairs
-        self._pair_widgets = []
-        self._render_index = 0
-        self._rendering = True
-        QTimer.singleShot(0, lambda: self._render_batch(generation))
+        self.difference_targets = self._build_difference_targets(pairs)
+
+        old_path = old.render_path or (old.path if old.path.suffix.lower() == ".pdf" else None)
+        new_path = new.render_path or (new.path if new.path.suffix.lower() == ".pdf" else None)
+        if not old_path or not new_path:
+            raise RuntimeError("Both documents need a rendered PDF view.")
+
+        self.old_source = PdfPageSource(old_path)
+        self.new_source = PdfPageSource(new_path)
+        self.old_highlights = self._collect_highlights(pairs, True, self.old_source)
+        self.new_highlights = self._collect_highlights(pairs, False, self.new_source)
+        self.old_page_widgets = self._populate(self.old_pane, self.old_source, self.old_highlights)
+        self.new_page_widgets = self._populate(self.new_pane, self.new_source, self.new_highlights)
+        self._resize_pages()
+        QTimer.singleShot(0, self.renderingFinished.emit)
 
     def cancel_render(self):
-        """Invalidate queued batches so they cannot touch a replaced or closing view."""
-        self._generation += 1
-        self._height_sync_token += 1
+        for widget in (*self.old_page_widgets, *self.new_page_widgets):
+            widget.detach()
+        self.old_page_widgets = []
+        self.new_page_widgets = []
+        if self.old_source:
+            self.old_source.close()
+        if self.new_source:
+            self.new_source.close()
+        self.old_source = None
+        self.new_source = None
+        self.old_highlights = {}
+        self.new_highlights = {}
+        self.difference_targets = []
         self._pairs = []
-        self._render_index = 0
-        self._rendering = False
 
-    def _render_batch(self, generation: int):
-        if generation != self._generation:
-            return
-        end = min(self._render_index + self.BATCH_SIZE, len(self._pairs))
-        for index in range(self._render_index, end):
-            pair = self._pairs[index]
-            old_widget, new_widget = make_block_widget(pair, True), make_block_widget(pair, False)
-            self.old_pane.content_layout.insertWidget(self.old_pane.content_layout.count() - 1, old_widget)
-            self.new_pane.content_layout.insertWidget(self.new_pane.content_layout.count() - 1, new_widget)
-            old_widget.setProperty("pairIndex", index); new_widget.setProperty("pairIndex", index)
-            self._pair_widgets.append((old_widget, new_widget))
-            if pair.status != DiffStatus.UNCHANGED:
-                self.change_positions.append(index)
-        self._render_index = end
-        if end < len(self._pairs):
-            QTimer.singleShot(0, lambda: self._render_batch(generation))
-        else:
-            QTimer.singleShot(0, lambda: self._start_height_sync(generation, True))
+    def _populate(self, pane, source: PdfPageSource, highlights):
+        widgets = []
+        for page_index in range(len(source.page_sizes)):
+            widget = PageCanvas(source, page_index, highlights.get(page_index, []), pane.content)
+            pane.content_layout.insertWidget(
+                pane.content_layout.count(),
+                widget,
+                0,
+                Qt.AlignmentFlag.AlignHCenter,
+            )
+            widgets.append(widget)
+        return widgets
 
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.Resize and self._pair_widgets and not self._rendering and not self._height_sync_pending:
-            self._height_sync_pending = True
-            QTimer.singleShot(0, self._sync_after_resize)
-        return super().eventFilter(watched, event)
+    def _collect_highlights(self, pairs: list[AlignedPair], old_side: bool, source: PdfPageSource):
+        by_page: dict[int, list[PageHighlight]] = defaultdict(list)
+        for pair in pairs:
+            if pair.status == DiffStatus.UNCHANGED:
+                continue
+            block = pair.old_block if old_side else pair.new_block
+            if not isinstance(block, TextBlock) or block.page is None or not block.rects:
+                continue
 
-    def _sync_after_resize(self):
-        self._height_sync_pending = False
-        if self._pair_widgets:
-            self._start_height_sync(self._generation, False)
+            rects = list(block.rects)
+            chunks = pair.old_inline if old_side else pair.new_inline
+            if pair.status == DiffStatus.MODIFIED and chunks:
+                clip = _union_rect(block.rects)
+                changed_rects = []
+                for chunk in chunks:
+                    if chunk.changed and normalize_text(chunk.text):
+                        changed_rects.extend(source.search(block.page, chunk.text, clip))
+                if changed_rects:
+                    rects = _deduplicate_rects(changed_rects)
 
-    def _start_height_sync(self, generation: int, emit_when_done: bool):
-        if generation != self._generation:
-            return
-        self._height_sync_token += 1
-        token = self._height_sync_token
-        self._height_sync_index = 0
-        self._sync_height_batch(generation, token, emit_when_done)
-
-    def _sync_height_batch(self, generation: int, token: int, emit_when_done: bool):
-        if generation != self._generation or token != self._height_sync_token:
-            return
-        end = min(self._height_sync_index + self.HEIGHT_BATCH_SIZE, len(self._pair_widgets))
-        self._synchronize_pair_heights(self._pair_widgets[self._height_sync_index:end])
-        self._height_sync_index = end
-        if end < len(self._pair_widgets):
-            QTimer.singleShot(0, lambda: self._sync_height_batch(generation, token, emit_when_done))
-        elif emit_when_done:
-            self._rendering = False
-            self.renderingFinished.emit()
+            by_page[block.page - 1].extend(PageHighlight(rect, pair.status) for rect in rects)
+        return dict(by_page)
 
     @staticmethod
-    def _natural_height(widget: QFrame) -> int:
-        layout = widget.layout()
-        width = max(1, widget.contentsRect().width())
-        if layout.hasHeightForWidth():
-            return max(layout.totalHeightForWidth(width), layout.minimumSize().height())
-        return max(layout.sizeHint().height(), layout.minimumSize().height())
+    def _build_difference_targets(pairs: list[AlignedPair]) -> list[DifferenceTarget]:
+        """Build one navigation target per changed source page on either side."""
+        all_old_pages = [page for pair in pairs if (page := getattr(pair.old_block, "page", None))]
+        all_new_pages = [page for pair in pairs if (page := getattr(pair.new_block, "page", None))]
+        max_old_page = max(all_old_pages, default=1)
+        max_new_page = max(all_new_pages, default=1)
+        changed_old: set[int] = set()
+        changed_new: set[int] = set()
+        first_old: dict[int, int] = {}
+        first_new: dict[int, int] = {}
+        for index, pair in enumerate(pairs):
+            if pair.status == DiffStatus.UNCHANGED:
+                continue
+            old_page = getattr(pair.old_block, "page", None)
+            new_page = getattr(pair.new_block, "page", None)
+            if old_page:
+                changed_old.add(old_page)
+                first_old.setdefault(old_page, index)
+            if new_page:
+                changed_new.add(new_page)
+                first_new.setdefault(new_page, index)
 
-    def _synchronize_pair_heights(self, widgets: list[tuple[QFrame, QFrame]]):
-        for old_widget, new_widget in widgets:
-            old_widget.setMinimumHeight(0); old_widget.setMaximumHeight(16777215)
-            new_widget.setMinimumHeight(0); new_widget.setMaximumHeight(16777215)
-            old_widget.layout().invalidate(); new_widget.layout().invalidate()
-            height = max(self._natural_height(old_widget), self._natural_height(new_widget))
-            old_widget.setFixedHeight(height); new_widget.setFixedHeight(height)
+        page_pair_weights: Counter[tuple[int, int]] = Counter()
+        page_pair_first: dict[tuple[int, int], int] = {}
+        for index, pair in enumerate(pairs):
+            old_page = getattr(pair.old_block, "page", None)
+            new_page = getattr(pair.new_block, "page", None)
+            if old_page in changed_old and new_page in changed_new:
+                key = (old_page, new_page)
+                page_pair_weights[key] += 1
+                page_pair_first.setdefault(key, index)
+
+        used_old: set[int] = set()
+        used_new: set[int] = set()
+        targets: list[tuple[int, DifferenceTarget]] = []
+        candidates = sorted(
+            page_pair_weights,
+            key=lambda key: (-page_pair_weights[key], page_pair_first[key]),
+        )
+        for old_page, new_page in candidates:
+            if old_page in used_old or new_page in used_new:
+                continue
+            used_old.add(old_page)
+            used_new.add(new_page)
+            targets.append((min(first_old[old_page], first_new[new_page]), DifferenceTarget(old_page, new_page)))
+
+        targets.extend(
+            (first_old[page], DifferenceTarget(page, None))
+            for page in changed_old - used_old
+        )
+        targets.extend(
+            (first_new[page], DifferenceTarget(None, page))
+            for page in changed_new - used_new
+        )
+        def page_progress(target: DifferenceTarget) -> float:
+            positions = []
+            if target.old_page:
+                positions.append(target.old_page / max_old_page)
+            if target.new_page:
+                positions.append(target.new_page / max_new_page)
+            return min(positions, default=0.0)
+
+        targets.sort(key=lambda item: (page_progress(item[1]), item[0]))
+        return [target for _position, target in targets]
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize and not self._resize_pending:
+            self._resize_pending = True
+            QTimer.singleShot(0, self._resize_pages)
+        return super().eventFilter(watched, event)
+
+    def _resize_pages(self):
+        self._resize_pending = False
+        for pane, widgets in (
+            (self.old_pane, self.old_page_widgets),
+            (self.new_pane, self.new_page_widgets),
+        ):
+            width = max(220, pane.scroll.viewport().width() - 34)
+            for widget in widgets:
+                widget.set_display_width(width)
 
     def scroll_both(self, delta: int):
         for pane in (self.old_pane, self.new_pane):
             bar: QScrollBar = pane.scroll.verticalScrollBar()
             bar.setValue(bar.value() + delta)
 
-    def navigate(self, pair_index: int):
+    def scroll_to_origin(self):
         for pane in (self.old_pane, self.new_pane):
-            for i in range(pane.content_layout.count()):
-                widget = pane.content_layout.itemAt(i).widget()
-                if widget and widget.property("pairIndex") == pair_index:
-                    pane.scroll.ensureWidgetVisible(widget, 0, 24)
-                    break
+            pane.scroll.verticalScrollBar().setValue(0)
+
+    def navigate_difference(self, target_index: int):
+        if not 0 <= target_index < len(self.difference_targets):
+            return
+        target = self.difference_targets[target_index]
+        targets = (
+            (self.old_pane, self.old_page_widgets, target.old_page),
+            (self.new_pane, self.new_page_widgets, target.new_page),
+        )
+        for pane, widgets, page_number in targets:
+            if page_number and 0 < page_number <= len(widgets):
+                page_widget = widgets[page_number - 1]
+                pane.scroll.verticalScrollBar().setValue(max(0, page_widget.y() - 8))

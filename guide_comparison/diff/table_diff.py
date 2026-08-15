@@ -6,7 +6,7 @@ from .models import AlignedRow, DiffStatus, TableBlock
 from .text_diff import normalize_text, similarity
 
 
-ROW_MODIFIED_THRESHOLD = 0.45
+ROW_MODIFIED_THRESHOLD = 0.40
 
 
 def row_key(row: list[str]) -> str:
@@ -47,4 +47,3 @@ def _align_replaced_rows(old_rows: list[list[str]], new_rows: list[list[str]]) -
     result.extend(AlignedRow(row, None, DiffStatus.REMOVED) for row in old_rows)
     result.extend(AlignedRow(None, row, DiffStatus.ADDED) for row in new_rows)
     return result
-

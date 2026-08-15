@@ -25,6 +25,15 @@ class AlignmentTests(unittest.TestCase):
         self.assertIn("30", "".join(c.text for c in pairs[0].old_inline if c.changed))
         self.assertIn("40", "".join(c.text for c in pairs[0].new_inline if c.changed))
 
+    def test_layout_only_spacing_is_unchanged(self):
+        pairs = compare_documents(document(["바이오의약품 사전 GMP 평가"]), document(["바이오의약품 사전GMP평가"]))
+        self.assertEqual(pairs[0].status, DiffStatus.UNCHANGED)
+
+    def test_small_numeric_change_in_long_text_is_not_hidden(self):
+        prefix = "허가 신청에 필요한 자료를 검토하고 평가 기간을 준수해야 합니다. " * 4
+        pairs = compare_documents(document([prefix + "30일"]), document([prefix + "40일"]))
+        self.assertEqual(pairs[0].status, DiffStatus.MODIFIED)
+
     def test_middle_insertions_realign_tail(self):
         pairs = compare_documents(document(list("ABCDEFG")), document(["A", "B", "C", "NEW 1", "NEW 2", "NEW 3", "D", "E", "F", "G"]))
         self.assertEqual(sum(p.status == DiffStatus.ADDED for p in pairs), 3)
@@ -38,4 +47,3 @@ class AlignmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -19,8 +19,9 @@ QFrame#dropArea { background: #fafbfd; border: 2px dashed #aab5c1; border-radius
 QFrame#dropArea:hover { background: #eef6ff; border-color: #4f8fcf; }
 QLabel#paneTitle { font-size: 17px; font-weight: 700; padding: 8px; }
 QLabel#fileInfo { color: #536170; }
-QLabel#summary { font-weight: 700; color: #34495e; }
+QPushButton#differencesButton { font-weight: 700; }
 QFrame#syncGutter { background: #d8dee5; border-left: 1px solid #b9c2cc; border-right: 1px solid #b9c2cc; }
+QWidget#pageStack { background: #dfe3e8; }
 QScrollBar:vertical { width: 11px; background: #edf0f3; }
 QScrollBar::handle:vertical { background: #aeb8c2; border-radius: 5px; min-height: 25px; }
 """
