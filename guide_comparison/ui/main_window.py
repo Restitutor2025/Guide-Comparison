@@ -4,7 +4,7 @@ import logging
 from collections import Counter
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt
+from PySide6.QtCore import QThread, QTimer, Qt
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QStatusBar, QVBoxLayout, QWidget,
@@ -28,7 +28,9 @@ class MainWindow(QMainWindow):
         self.old_path: Path | None = None
         self.new_path: Path | None = None
         self._thread: QThread | None = None
+        self._worker: CompareWorker | None = None
         self._pending_compare = False
+        self._close_when_finished = False
         self._change_cursor = -1
         self._build_ui()
 
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.renderer = ComparisonRenderer(self.old_pane, self.new_pane, self.gutter)
+        self.renderer.renderingFinished.connect(self._rendering_finished)
         self.old_pane.fileSelected.connect(lambda path: self.set_file("old", path))
         self.new_pane.fileSelected.connect(lambda path: self.set_file("new", path))
         self.old_pane.select_button.clicked.connect(lambda: self.select_file("old"))
@@ -91,6 +94,7 @@ class MainWindow(QMainWindow):
             self.old_path = None; self.old_pane.set_document(None)
         else:
             self.new_path = None; self.new_pane.set_document(None)
+        self.renderer.cancel_render()
         self.old_pane.clear_content(); self.new_pane.clear_content()
         self.summary.setText("Added: 0    Removed: 0    Modified: 0")
         self._set_navigation_enabled(False)
@@ -112,18 +116,22 @@ class MainWindow(QMainWindow):
             return
         if self._thread and self._thread.isRunning():
             self._pending_compare = True
+            self._thread.requestInterruption()
             self.statusBar().showMessage("A newer selection is queued...")
             return
         old_path, new_path = self.old_path, self.new_path
+        self.renderer.cancel_render()
+        self._set_navigation_enabled(False)
         self._thread = QThread(self)
-        worker = CompareWorker(old_path, new_path)
-        worker.moveToThread(self._thread)
-        self._thread.started.connect(worker.run)
-        worker.progress.connect(self.statusBar().showMessage)
-        worker.succeeded.connect(self.comparison_ready)
-        worker.failed.connect(self.comparison_failed)
-        worker.finished.connect(self._thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        self._worker = CompareWorker(old_path, new_path)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self.statusBar().showMessage)
+        self._worker.succeeded.connect(self.comparison_ready)
+        self._worker.failed.connect(self.comparison_failed)
+        self._worker.cancelled.connect(lambda: self.statusBar().showMessage("Comparison cancelled."))
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.finished.connect(self._worker_finished)
         self.swap_button.setEnabled(False)
@@ -132,8 +140,12 @@ class MainWindow(QMainWindow):
 
     def _worker_finished(self):
         self._thread = None
+        self._worker = None
         self.swap_button.setEnabled(True)
         self.compare_button.setEnabled(True)
+        if self._close_when_finished:
+            QTimer.singleShot(0, self.close)
+            return
         if self._pending_compare:
             self._pending_compare = False
             self.compare_if_ready()
@@ -147,14 +159,21 @@ class MainWindow(QMainWindow):
         counts = Counter(pair.status for pair in pairs)
         self.summary.setText(f"Added: {counts[DiffStatus.ADDED]}    Removed: {counts[DiffStatus.REMOVED]}    Modified: {counts[DiffStatus.MODIFIED]}")
         self._change_cursor = -1
-        self._set_navigation_enabled(bool(self.renderer.change_positions))
-        self.statusBar().showMessage("Comparison complete.", 5000)
-        log.info("Comparison complete")
+        self._set_navigation_enabled(False)
+        self.statusBar().showMessage("Rendering...")
         warnings = [warning for warning in (old.warning, new.warning) if warning]
         if warnings:
             QMessageBox.information(self, "Limited text extraction", "\n\n".join(warnings))
 
-    def comparison_failed(self, message: str):
+    def _rendering_finished(self):
+        self._change_cursor = -1
+        self._set_navigation_enabled(bool(self.renderer.change_positions))
+        self.statusBar().showMessage("Comparison complete.", 5000)
+        log.info("Comparison complete")
+
+    def comparison_failed(self, old_path: Path, new_path: Path, message: str):
+        if old_path != self.old_path or new_path != self.new_path or self._close_when_finished:
+            return
         self.statusBar().showMessage("Comparison failed.")
         QMessageBox.critical(self, "Unable to compare documents", message)
 
@@ -170,5 +189,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._thread and self._thread.isRunning():
-            self._thread.quit(); self._thread.wait(2000)
+            self._close_when_finished = True
+            self._pending_compare = False
+            self._thread.requestInterruption()
+            self.hide()
+            self.statusBar().showMessage("Finishing document processing before exit...")
+            event.ignore()
+            return
+        self.renderer.cancel_render()
         super().closeEvent(event)

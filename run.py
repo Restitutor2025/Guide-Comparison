@@ -24,18 +24,41 @@ def running_in_project_venv() -> bool:
     return Path(sys.prefix).resolve() == VENV_DIR.resolve()
 
 
+def python_is_usable(python_path: Path) -> bool:
+    """Return whether an interpreter launcher can actually start Python."""
+    if not python_path.is_file():
+        return False
+    try:
+        completed = subprocess.run(
+            [str(python_path), "-c", "import sys; raise SystemExit(0)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+        return completed.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def relaunch_in_project_venv() -> int | None:
     """Create the project venv when needed and relaunch this script inside it."""
     if running_in_project_venv():
         return None
 
     try:
-        if not VENV_PYTHON.is_file():
-            print(f"Creating virtual environment at {VENV_DIR}...")
-            subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+        if not python_is_usable(VENV_PYTHON):
+            rebuilding = VENV_DIR.exists()
+            action = "Repairing" if rebuilding else "Creating"
+            print(f"{action} virtual environment at {VENV_DIR}...")
+            command = [sys.executable, "-m", "venv"]
+            if rebuilding:
+                command.append("--clear")
+            command.append(str(VENV_DIR))
+            subprocess.run(command, check=True)
 
-        if not VENV_PYTHON.is_file():
-            raise OSError(f"Virtual environment Python was not created: {VENV_PYTHON}")
+        if not python_is_usable(VENV_PYTHON):
+            raise OSError(f"A usable virtual environment Python was not created: {VENV_PYTHON}")
 
         print("Restarting with the project virtual environment...")
         completed = subprocess.run(
@@ -43,7 +66,7 @@ def relaunch_in_project_venv() -> int | None:
             check=False,
         )
         return completed.returncode
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         print(
             "\nUnable to prepare the project virtual environment.\n\n"
             "Please check:\n- Python venv availability\n- Project folder permissions\n\n"

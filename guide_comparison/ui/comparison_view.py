@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QPoint, Signal, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Signal, Qt
 from PySide6.QtGui import QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QFrame, QLabel, QScrollBar, QSizePolicy, QVBoxLayout, QWidget
 
@@ -103,28 +103,114 @@ def make_block_widget(pair: AlignedPair, old_side: bool) -> QFrame:
     return frame
 
 
-class ComparisonRenderer:
+class ComparisonRenderer(QObject):
     """Renders both sides in lockstep and keeps corresponding rows equal-height."""
 
+    renderingFinished = Signal()
+    BATCH_SIZE = 24
+    HEIGHT_BATCH_SIZE = 80
+
     def __init__(self, old_pane, new_pane, gutter: SyncGutter):
+        super().__init__(old_pane)
         self.old_pane, self.new_pane, self.gutter = old_pane, new_pane, gutter
         gutter.deltaDragged.connect(self.scroll_both)
         gutter.wheelDelta.connect(lambda delta: self.scroll_both(int(delta / 2)))
         self.change_positions: list[int] = []
+        self._pairs: list[AlignedPair] = []
+        self._pair_widgets: list[tuple[QFrame, QFrame]] = []
+        self._render_index = 0
+        self._generation = 0
+        self._height_sync_pending = False
+        self._height_sync_token = 0
+        self._height_sync_index = 0
+        self._rendering = False
+        old_pane.scroll.viewport().installEventFilter(self)
+        new_pane.scroll.viewport().installEventFilter(self)
 
     def render(self, pairs: list[AlignedPair]):
+        self._generation += 1
+        generation = self._generation
         self.old_pane.clear_content(); self.new_pane.clear_content()
         self.change_positions = []
-        for index, pair in enumerate(pairs):
+        self._pairs = pairs
+        self._pair_widgets = []
+        self._render_index = 0
+        self._rendering = True
+        QTimer.singleShot(0, lambda: self._render_batch(generation))
+
+    def cancel_render(self):
+        """Invalidate queued batches so they cannot touch a replaced or closing view."""
+        self._generation += 1
+        self._height_sync_token += 1
+        self._pairs = []
+        self._render_index = 0
+        self._rendering = False
+
+    def _render_batch(self, generation: int):
+        if generation != self._generation:
+            return
+        end = min(self._render_index + self.BATCH_SIZE, len(self._pairs))
+        for index in range(self._render_index, end):
+            pair = self._pairs[index]
             old_widget, new_widget = make_block_widget(pair, True), make_block_widget(pair, False)
             self.old_pane.content_layout.insertWidget(self.old_pane.content_layout.count() - 1, old_widget)
             self.new_pane.content_layout.insertWidget(self.new_pane.content_layout.count() - 1, new_widget)
             old_widget.setProperty("pairIndex", index); new_widget.setProperty("pairIndex", index)
-            old_widget.adjustSize(); new_widget.adjustSize()
-            height = max(old_widget.sizeHint().height(), new_widget.sizeHint().height())
-            old_widget.setMinimumHeight(height); new_widget.setMinimumHeight(height)
+            self._pair_widgets.append((old_widget, new_widget))
             if pair.status != DiffStatus.UNCHANGED:
                 self.change_positions.append(index)
+        self._render_index = end
+        if end < len(self._pairs):
+            QTimer.singleShot(0, lambda: self._render_batch(generation))
+        else:
+            QTimer.singleShot(0, lambda: self._start_height_sync(generation, True))
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize and self._pair_widgets and not self._rendering and not self._height_sync_pending:
+            self._height_sync_pending = True
+            QTimer.singleShot(0, self._sync_after_resize)
+        return super().eventFilter(watched, event)
+
+    def _sync_after_resize(self):
+        self._height_sync_pending = False
+        if self._pair_widgets:
+            self._start_height_sync(self._generation, False)
+
+    def _start_height_sync(self, generation: int, emit_when_done: bool):
+        if generation != self._generation:
+            return
+        self._height_sync_token += 1
+        token = self._height_sync_token
+        self._height_sync_index = 0
+        self._sync_height_batch(generation, token, emit_when_done)
+
+    def _sync_height_batch(self, generation: int, token: int, emit_when_done: bool):
+        if generation != self._generation or token != self._height_sync_token:
+            return
+        end = min(self._height_sync_index + self.HEIGHT_BATCH_SIZE, len(self._pair_widgets))
+        self._synchronize_pair_heights(self._pair_widgets[self._height_sync_index:end])
+        self._height_sync_index = end
+        if end < len(self._pair_widgets):
+            QTimer.singleShot(0, lambda: self._sync_height_batch(generation, token, emit_when_done))
+        elif emit_when_done:
+            self._rendering = False
+            self.renderingFinished.emit()
+
+    @staticmethod
+    def _natural_height(widget: QFrame) -> int:
+        layout = widget.layout()
+        width = max(1, widget.contentsRect().width())
+        if layout.hasHeightForWidth():
+            return max(layout.totalHeightForWidth(width), layout.minimumSize().height())
+        return max(layout.sizeHint().height(), layout.minimumSize().height())
+
+    def _synchronize_pair_heights(self, widgets: list[tuple[QFrame, QFrame]]):
+        for old_widget, new_widget in widgets:
+            old_widget.setMinimumHeight(0); old_widget.setMaximumHeight(16777215)
+            new_widget.setMinimumHeight(0); new_widget.setMaximumHeight(16777215)
+            old_widget.layout().invalidate(); new_widget.layout().invalidate()
+            height = max(self._natural_height(old_widget), self._natural_height(new_widget))
+            old_widget.setFixedHeight(height); new_widget.setFixedHeight(height)
 
     def scroll_both(self, delta: int):
         for pane in (self.old_pane, self.new_pane):
