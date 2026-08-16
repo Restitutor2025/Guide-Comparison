@@ -28,7 +28,9 @@ executable = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX-packed executables are disproportionately flagged by heuristic AV
+    # engines. The modest size saving is not worth the distribution risk.
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -43,7 +45,7 @@ bundle = COLLECT(
     analysis.binaries,
     analysis.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="GuideComparison",
 )

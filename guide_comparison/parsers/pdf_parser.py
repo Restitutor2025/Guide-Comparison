@@ -13,9 +13,20 @@ from guide_comparison.parsers.base import DocumentParseError
 
 
 _PAGE_NUMBER = re.compile(r"^\s*(?:[-–—]\s*)?\d+(?:\s*[-–—])?\s*$")
-_BULLET = re.compile(r"^\s*(?:[•●▪◦*-]|\d+[.)])\s+")
+_BULLET = re.compile(
+    r"^\s*(?:[•●▪◦*\-○◯ㅇ□■※☎☞]|[①-⑳➀-➉]|\(?\d{1,3}\)?[.)]|[가-하][.)])\s*"
+)
 _DATE_ONLY = re.compile(r"^\s*(?:19|20)\d{2}\s*(?:[.\-/년]\s*\d{1,2})?(?:\s*[.\-/월]\s*\d{1,2}\s*일?)?\.?\s*$")
-_STRUCTURAL_START = re.compile(r"^\s*(?:[•●▪◦*\-○□■※☎☞]|\d+[.)]\s+|[가-하][.)]\s+|제\s*\d+\s*[조장절])")
+_STRUCTURAL_START = re.compile(
+    r"^\s*(?:[•●▪◦*\-○◯ㅇ□■※☎☞]|[①-⑳➀-➉]|\(?\d{1,3}\)?[.)]\s+|[가-하][.)]\s+|제\s*\d+\s*[조장절]|\[예시\]|<참고>)"
+)
+_HEADING_START = re.compile(r"^\s*(?:\d+(?:-\d+)*\s+|제\s*\d+\s*[장절])")
+_ANGLE_HEADING = re.compile(r"^\s*[<＜]\s*(.+?)\s*[>＞]\s*$")
+_MARKER = re.compile(
+    r"^\s*(?P<marker>\[(?:예시|참고)\]|※|☞|[①-⑳➀-➉]|[○◯ㅇ●•□■▪◦]|\(?\d{1,3}\)?[.)]|[가-하][.)])(?:\s+|(?=[가-힣A-Za-z])|$)"
+)
+_NUMBERED_HEADING = re.compile(r"^\s*(?P<number>\d+(?:-\d+)*)\s+")
+_LEGAL_HEADING = re.compile(r"^\s*제\s*(?P<number>\d+)\s*(?P<kind>[장절조])")
 _TERMINAL_END = re.compile(r"[.!?。！？:;：；]\s*[\"'”’）)\]]*\s*$")
 
 
@@ -32,12 +43,65 @@ def _normalize_lines(text: str) -> str:
     return result.strip()
 
 
-def _type_for(text: str, size: float, median_size: float) -> str:
+def _type_for(text: str, size: float, median_size: float, bold: bool = False) -> str:
+    if _DATE_ONLY.match(text):
+        return "paragraph"
+    if _ANGLE_HEADING.match(text):
+        return "heading"
     if _BULLET.match(text):
         return "list"
-    if size >= median_size * 1.18 and len(text) < 180:
+    if _HEADING_START.match(text) or (bold and size >= median_size * 1.08 and len(text) < 100):
         return "heading"
     return "paragraph"
+
+
+def _heading_identity(text: str) -> tuple[int, str]:
+    legal = _LEGAL_HEADING.match(text)
+    if legal:
+        level = {"장": 1, "절": 2, "조": 3}[legal.group("kind")]
+        return level, f"heading:{legal.group('kind')}:{legal.group('number')}"
+    numbered = _NUMBERED_HEADING.match(text)
+    if numbered:
+        number = numbered.group("number")
+        return min(3, number.count("-") + 1), f"heading:number:{number}"
+    angle = _ANGLE_HEADING.match(text)
+    if angle:
+        compact = re.sub(r"\s+", "", angle.group(1)).casefold()
+        return 3, f"heading:box:{compact}"
+    compact = re.sub(r"\s+", "", text).casefold()[:80]
+    return 2, f"heading:title:{compact}"
+
+
+def _assign_structure_paths(blocks: list[TextBlock]) -> None:
+    """Attach deterministic heading/list paths without relying on page numbers."""
+    headings: list[tuple[int, str]] = []
+    lists: list[tuple[float, str]] = []
+    indent_tolerance = 5.0
+
+    for block in blocks:
+        if block.block_type == "heading":
+            level, identity = _heading_identity(block.text)
+            headings = [(item_level, item) for item_level, item in headings if item_level < level]
+            headings.append((level, identity))
+            lists.clear()
+            block.structure_path = tuple(item for _level, item in headings)
+            continue
+
+        match = _MARKER.match(block.text)
+        if not match:
+            continue
+        marker = match.group("marker")
+        x = block.rects[0][0] if block.rects else 0.0
+        if marker.startswith("["):
+            block.marker = marker
+            block.structure_path = tuple(item for _level, item in headings) + (f"item:{marker}",)
+            continue
+        while lists and x <= lists[-1][0] + indent_tolerance:
+            lists.pop()
+        identity = f"item:{marker}"
+        block.marker = marker
+        block.structure_path = tuple(item for _level, item in headings) + tuple(item for _x, item in lists) + (identity,)
+        lists.append((x, identity))
 
 
 def _inside_table(rects, table_boxes) -> bool:
@@ -50,7 +114,7 @@ def _inside_table(rects, table_boxes) -> bool:
 
 
 def _should_merge(previous: TextBlock, current: TextBlock, page_width: float, table_boxes) -> bool:
-    if previous.block_type != "paragraph" or current.block_type != "paragraph":
+    if previous.block_type not in {"paragraph", "list"} or current.block_type != "paragraph":
         return False
     if not previous.rects or not current.rects:
         return False
@@ -63,13 +127,17 @@ def _should_merge(previous: TextBlock, current: TextBlock, page_width: float, ta
     current_line = current.rects[0]
     line_height = max(previous_line[3] - previous_line[1], current_line[3] - current_line[1], 1.0)
     vertical_gap = current_line[1] - previous_line[3]
-    if not -1.0 <= vertical_gap <= line_height * 1.25:
+    if not -line_height * 0.35 <= vertical_gap <= line_height * 1.25:
         return False
-    if abs(current_line[0] - previous_line[0]) > line_height * 2.1:
+    horizontal_delta = current_line[0] - previous_line[0]
+    if previous.block_type == "list":
+        if not -line_height <= horizontal_delta <= line_height * 4.0:
+            return False
+    elif abs(horizontal_delta) > line_height * 2.1:
         return False
 
     previous_width = previous_line[2] - previous_line[0]
-    return previous_width >= page_width * 0.45 or len(previous.text) >= 28
+    return previous_width >= page_width * 0.35 or len(previous.text) >= 20
 
 
 def _merge_page_blocks(blocks: list[TextBlock], page_width: float, table_boxes) -> list[TextBlock]:
@@ -93,7 +161,7 @@ def parse_pdf(path: Path, *, source_path: Path | None = None) -> ParsedDocument:
     try:
         if document.needs_pass:
             raise DocumentParseError("This PDF is encrypted. Password-protected PDFs are not supported.")
-        page_items: list[list[tuple[str, float, float, list[tuple[float, float, float, float]], list[tuple[str, float, float, float, float]]]]] = []
+        page_items: list[list[tuple[str, float, float, bool, list[tuple[float, float, float, float]], list[tuple[str, float, float, float, float]]]]] = []
         page_table_boxes: list[list[tuple[float, float, float, float]]] = []
         page_widths: list[float] = []
         edge_candidates: list[str] = []
@@ -104,35 +172,32 @@ def parse_pdf(path: Path, *, source_path: Path | None = None) -> ParsedDocument:
             for block in data.get("blocks", []):
                 if block.get("type") != 0:
                     continue
-                lines = []
-                block_sizes = []
-                line_rects: list[tuple[float, float, float, float]] = []
-                block_chars: list[tuple[str, float, float, float, float]] = []
                 for line in block.get("lines", []):
                     text_parts = []
+                    line_sizes = []
+                    line_bold = False
+                    line_chars: list[tuple[str, float, float, float, float]] = []
                     for span in line.get("spans", []):
                         span_chars = span.get("chars", [])
                         text_parts.append("".join(char.get("c", "") for char in span_chars))
+                        line_sizes.append(float(span.get("size", 10)))
+                        line_bold = line_bold or bool(int(span.get("flags", 0)) & 16)
                         for char in span_chars:
                             bbox = char.get("bbox")
                             value = char.get("c", "")
                             if value and bbox and len(bbox) == 4:
-                                block_chars.append((value, *(float(item) for item in bbox)))
-                    text = "".join(text_parts)
-                    if text.strip():
-                        lines.append(text)
-                        block_sizes.extend(float(span.get("size", 10)) for span in line.get("spans", []))
-                        bbox = line.get("bbox")
-                        if bbox and len(bbox) == 4:
-                            line_rects.append(tuple(float(value) for value in bbox))
-                text = _normalize_lines("\n".join(lines))
-                if not text or _PAGE_NUMBER.match(text):
-                    continue
-                y = float(block.get("bbox", (0, 0, 0, 0))[1])
-                size = sum(block_sizes) / len(block_sizes) if block_sizes else 10.0
-                entries.append((text, y, size, line_rects, block_chars)); sizes.append(size)
-                if y < page.rect.height * 0.12 or y > page.rect.height * 0.88:
-                    edge_candidates.append(text)
+                                line_chars.append((value, *(float(item) for item in bbox)))
+                    text = _normalize_lines("".join(text_parts))
+                    bbox = line.get("bbox")
+                    if not text or _PAGE_NUMBER.match(text) or not bbox or len(bbox) != 4:
+                        continue
+                    rect = tuple(float(value) for value in bbox)
+                    y = rect[1]
+                    size = sum(line_sizes) / len(line_sizes) if line_sizes else 10.0
+                    entries.append((text, y, size, line_bold, [rect], line_chars))
+                    sizes.append(size)
+                    if y < page.rect.height * 0.12 or y > page.rect.height * 0.88:
+                        edge_candidates.append(text)
             page_items.append(entries)
             page_widths.append(float(page.rect.width))
             try:
@@ -152,16 +217,22 @@ def parse_pdf(path: Path, *, source_path: Path | None = None) -> ParsedDocument:
         median = sorted(sizes)[len(sizes) // 2] if sizes else 10.0
         blocks = []
         for page_index, entries in enumerate(page_items):
-            page_blocks = [
-                TextBlock(text, _type_for(text, size, median), page_index + 1, rects, chars)
-                for text, _y, size, rects, chars in entries
-                if text not in repeated
-            ]
+            page_blocks = []
+            for text, _y, size, bold, rects, chars in entries:
+                if text in repeated:
+                    continue
+                block_type = (
+                    "table_cell"
+                    if _inside_table(rects, page_table_boxes[page_index])
+                    else _type_for(text, size, median, bold)
+                )
+                page_blocks.append(TextBlock(text, block_type, page_index + 1, rects, chars))
             blocks.extend(_merge_page_blocks(
                 page_blocks,
                 page_widths[page_index],
                 page_table_boxes[page_index],
             ))
+        _assign_structure_paths(blocks)
         warning = None
         extracted = sum(len(block.text) for block in blocks)
         if len(document) and extracted < max(20, len(document) * 8):

@@ -83,18 +83,27 @@ class DocumentPane(QWidget):
         self.role = role
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        header = QHBoxLayout()
-        title = QLabel(role)
+        root.setSpacing(7)
+        header_frame = QFrame()
+        header_frame.setObjectName("paneHeader")
+        header = QHBoxLayout(header_frame)
+        header.setContentsMargins(10, 7, 8, 7)
+        header.setSpacing(7)
+        title = QLabel("기존 문서" if role == "OLD" else "비교 문서")
         title.setObjectName("paneTitle")
-        self.info = QLabel("No document")
+        role_badge = QLabel(role)
+        role_badge.setObjectName("paneRoleBadge")
+        role_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.info = QLabel("선택된 문서 없음")
         self.info.setObjectName("fileInfo")
-        self.select_button = QPushButton(f"Select {role.title()} File")
-        self.clear_button = QPushButton("Clear")
+        self.select_button = QPushButton("파일 선택")
+        self.clear_button = QPushButton("지우기")
         header.addWidget(title)
+        header.addWidget(role_badge)
         header.addWidget(self.info, 1)
         header.addWidget(self.select_button)
         header.addWidget(self.clear_button)
-        root.addLayout(header)
+        root.addWidget(header_frame)
         self.drop_area = DropArea(role)
         root.addWidget(self.drop_area)
         self.scroll = HandScrollArea()
@@ -112,7 +121,7 @@ class DocumentPane(QWidget):
 
     def set_document(self, path: Path | None, detail: str = ""):
         self.drop_area.set_file(path)
-        self.info.setText(f"{path.name}\n{detail}" if path else "No document")
+        self.info.setText(f"{path.name}\n{detail}" if path else "선택된 문서 없음")
 
     def clear_content(self):
         while self.content_layout.count():

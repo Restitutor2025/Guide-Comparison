@@ -20,12 +20,15 @@ class TextBlock:
     page: int | None = None
     rects: list[tuple[float, float, float, float]] = field(default_factory=list)
     chars: list[tuple[str, float, float, float, float]] = field(default_factory=list)
+    structure_path: tuple[str, ...] = ()
+    marker: str | None = None
 
 
 @dataclass(slots=True)
 class TableBlock:
     rows: list[list[str]]
     page: int | None = None
+    structure_path: tuple[str, ...] = ()
     block_type: str = field(default="table", init=False)
 
 
@@ -46,6 +49,7 @@ class InlineChunk:
     text: str
     changed: bool = False
     rects: list[tuple[float, float, float, float]] = field(default_factory=list)
+    status: DiffStatus = DiffStatus.UNCHANGED
 
 
 @dataclass(slots=True)

@@ -5,7 +5,7 @@ import unicodedata
 from collections import Counter
 from difflib import SequenceMatcher
 
-from .models import InlineChunk, TextBlock
+from .models import DiffStatus, InlineChunk, TextBlock
 
 
 _WHITESPACE = re.compile(r"\s+")
@@ -55,9 +55,11 @@ def inline_diff(old: str, new: str) -> tuple[list[InlineChunk], list[InlineChunk
     new_result: list[InlineChunk] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if i1 != i2:
-            old_result.append(InlineChunk("".join(old_tokens[i1:i2]), tag != "equal"))
+            status = DiffStatus.REMOVED if tag == "delete" else DiffStatus.MODIFIED if tag == "replace" else DiffStatus.UNCHANGED
+            old_result.append(InlineChunk("".join(old_tokens[i1:i2]), tag != "equal", status=status))
         if j1 != j2:
-            new_result.append(InlineChunk("".join(new_tokens[j1:j2]), tag != "equal"))
+            status = DiffStatus.ADDED if tag == "insert" else DiffStatus.MODIFIED if tag == "replace" else DiffStatus.UNCHANGED
+            new_result.append(InlineChunk("".join(new_tokens[j1:j2]), tag != "equal", status=status))
     return _coalesce(old_result), _coalesce(new_result)
 
 
@@ -68,6 +70,43 @@ def _character_units(block: TextBlock):
         if key:
             units.append((key, char))
     return units
+
+
+def _character_tokens(block: TextBlock):
+    """Group positioned PDF characters into semantic comparison tokens."""
+    tokens = []
+    key_parts = []
+    chars = []
+    kind = None
+
+    def flush():
+        nonlocal key_parts, chars, kind
+        if key_parts:
+            tokens.append(("".join(key_parts), chars))
+        key_parts, chars, kind = [], [], None
+
+    for char in block.chars:
+        value = unicodedata.normalize("NFKC", char[0]).translate(_PUNCTUATION).casefold()
+        if not value or value.isspace():
+            flush()
+            continue
+        if value.isdigit():
+            current_kind = "digit"
+        elif all(character.isalpha() for character in value):
+            current_kind = "word"
+        elif value == "_":
+            current_kind = "underscore"
+        else:
+            current_kind = "punctuation"
+        if kind is not None and (current_kind != kind or current_kind == "punctuation"):
+            flush()
+        kind = current_kind
+        key_parts.append(value)
+        chars.append(char)
+        if current_kind == "punctuation":
+            flush()
+    flush()
+    return tokens
 
 
 def _character_rects(chars) -> list[tuple[float, float, float, float]]:
@@ -87,6 +126,36 @@ def _character_rects(chars) -> list[tuple[float, float, float, float]]:
     return [tuple(rect) for rect in rects]
 
 
+def _display_rects(chars, block: TextBlock, *, changed: bool) -> list[tuple[float, float, float, float]]:
+    """Return display rectangles without inferring character ownership from geometry.
+
+    PDF glyph boxes can overlap their neighbours.  A changed digit immediately
+    before a Korean unit, for example ``3개월``, must therefore be associated
+    with a token by its source character rather than by intersecting rectangles.
+    """
+    rects = _character_rects(chars)
+    if not changed:
+        return rects
+
+    key = "".join(matching_text(char[0]) for char in chars)
+    if len(key) != 1:
+        return rects
+
+    source_char = chars[0]
+    for token_key, token_chars in _character_tokens(block):
+        if source_char not in token_chars:
+            continue
+        # A one-letter Korean/Latin edit needs its containing word for context.
+        # A changed digit stays numeric; if it belongs to a multi-digit value,
+        # show the complete value rather than an adjacent unit or word.
+        if key.isalpha() and token_key.isalpha() and len(token_key) > 1:
+            return _character_rects(token_chars)
+        if key.isdigit() and token_key.isdigit() and len(token_key) > 1:
+            return _character_rects(token_chars)
+        break
+    return rects
+
+
 def inline_diff_blocks(old: TextBlock, new: TextBlock) -> tuple[list[InlineChunk], list[InlineChunk]]:
     """Compare merged paragraph characters while retaining original PDF rectangles."""
     old_units, new_units = _character_units(old), _character_units(new)
@@ -102,20 +171,32 @@ def inline_diff_blocks(old: TextBlock, new: TextBlock) -> tuple[list[InlineChunk
     old_result: list[InlineChunk] = []
     new_result: list[InlineChunk] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        changed = tag != "equal"
         if i1 != i2:
             chars = [char for _key, char in old_units[i1:i2]]
-            old_result.append(InlineChunk("".join(char[0] for char in chars), changed, _character_rects(chars)))
+            status = DiffStatus.REMOVED if tag == "delete" else DiffStatus.MODIFIED if tag == "replace" else DiffStatus.UNCHANGED
+            old_result.append(InlineChunk(
+                "".join(char[0] for char in chars),
+                tag != "equal",
+                _display_rects(chars, old, changed=tag != "equal"),
+                status,
+            ))
         if j1 != j2:
             chars = [char for _key, char in new_units[j1:j2]]
-            new_result.append(InlineChunk("".join(char[0] for char in chars), changed, _character_rects(chars)))
-    return _coalesce(old_result), _coalesce(new_result)
+            status = DiffStatus.ADDED if tag == "insert" else DiffStatus.MODIFIED if tag == "replace" else DiffStatus.UNCHANGED
+            new_result.append(InlineChunk(
+                "".join(char[0] for char in chars),
+                tag != "equal",
+                _display_rects(chars, new, changed=tag != "equal"),
+                status,
+            ))
+    old_result, new_result = _coalesce(old_result), _coalesce(new_result)
+    return old_result, new_result
 
 
 def _coalesce(chunks: list[InlineChunk]) -> list[InlineChunk]:
     result: list[InlineChunk] = []
     for chunk in chunks:
-        if chunk.text and result and result[-1].changed == chunk.changed:
+        if chunk.text and result and result[-1].changed == chunk.changed and result[-1].status == chunk.status:
             result[-1].text += chunk.text
             result[-1].rects.extend(chunk.rects)
         elif chunk.text:

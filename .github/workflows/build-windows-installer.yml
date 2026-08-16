@@ -37,12 +37,32 @@ jobs:
         shell: powershell
         run: choco install innosetup --no-progress -y
 
+      - name: Import code-signing certificate
+        shell: powershell
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            throw "Repository secret WINDOWS_CERTIFICATE_BASE64 is required for distributable builds."
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP "guide-comparison-signing.pfx"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          try {
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            "WINDOWS_SIGNING_CERT_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+          } finally {
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Build offline installer
         shell: powershell
         run: >-
           .\packaging\build_windows.ps1
           -Version "$env:APP_VERSION"
           -LibreOfficeVersion "$env:LIBREOFFICE_VERSION"
+          -RequireCodeSigning
 
       - name: Upload GuideComparisonSetup.exe
         uses: actions/upload-artifact@v4

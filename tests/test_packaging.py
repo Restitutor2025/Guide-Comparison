@@ -59,6 +59,19 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('DestName: "LibreOffice.msi"', installer)
         self.assertIn('Filename: "{sys}\\msiexec.exe"', installer)
 
+    def test_windows_release_build_avoids_upx_and_supports_full_signing(self):
+        spec = (PROJECT_ROOT / "packaging" / "GuideComparison.spec").read_text(encoding="utf-8")
+        installer = (PROJECT_ROOT / "packaging" / "GuideComparison.iss").read_text(encoding="utf-8")
+        build_script = (PROJECT_ROOT / "packaging" / "build_windows.ps1").read_text(encoding="utf-8")
+
+        self.assertNotIn("upx=True", spec)
+        self.assertEqual(spec.count("upx=False"), 2)
+        self.assertIn("SignTool=guidecomparisonsigntool", installer)
+        self.assertIn("SignedUninstaller=yes", installer)
+        self.assertIn("Assert-ValidSignature $ApplicationExe", build_script)
+        self.assertIn("Assert-ValidSignature $Installer", build_script)
+        self.assertIn("$RequireCodeSigning", build_script)
+
 
 if __name__ == "__main__":
     unittest.main()

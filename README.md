@@ -6,13 +6,13 @@ Guide Comparison is a local, deterministic desktop application for comparing an 
 
 - OLD/NEW drag and drop plus file-picker fallback
 - Original PDF/Word page layout instead of reconstructed text cards
-- Only pages containing detected differences are shown
-- Selection-like overlays: added (green), removed (red), and modified (yellow)
-- No virtual blank pages or placeholder cards for one-sided content
+- Toggle between all pages and pages containing detected changes
+- Every changed page is shown with a real corresponding page on the opposite side
+- Selection-like overlays: added (green), removed (red), and modified (yellow), including directional colors inside modified paragraphs
 - Lazy page rendering to keep long documents responsive
 - Independent hand-drag and wheel scrolling directly over either document page
 - Synchronized drag and wheel scrolling from page margins or the center gutter
-- Centered `Differences X/Y` counter with separate previous/next navigation, swap, clear, and file replacement
+- Centered `변경점 X/Y` counter with separate previous/next navigation, swap, clear, page-mode toggle, and file replacement
 - Background parsing and comparison so the interface stays responsive
 - Read-only processing: input documents are never changed
 
@@ -43,6 +43,18 @@ Build it on an x64 Windows machine with Python and Inno Setup installed:
 .\packaging\build_windows.ps1
 ```
 
+The command above creates an unsigned development build. For a distributable build, install a publicly trusted Authenticode code-signing certificate (with its private key) in the Windows certificate store and run:
+
+```powershell
+.\packaging\build_windows.ps1 `
+  -SigningThumbprint "YOUR_CERTIFICATE_THUMBPRINT" `
+  -RequireCodeSigning
+```
+
+The release build signs and verifies the frozen application, the Inno Setup uninstaller, and the final installer with SHA-256 and an RFC 3161 timestamp. UPX compression is disabled because packed Python executables are more likely to trigger heuristic antivirus detections. Do not substitute a self-signed certificate for public distribution: recipient PCs will not trust it and it does not establish SmartScreen reputation.
+
+The GitHub Actions workflow intentionally requires the repository secrets `WINDOWS_CERTIFICATE_BASE64` (a base64-encoded PFX) and `WINDOWS_CERTIFICATE_PASSWORD`; it refuses to publish an unsigned artifact. If Microsoft Defender still reports a signed release, submit that exact file as a software-developer false positive through the [Microsoft Security Intelligence file submission portal](https://www.microsoft.com/en-us/wdsi/filesubmission). Do not submit source documents or user data.
+
 The output is `dist\installer\GuideComparisonSetup.exe`. The installer is intentionally large because it contains the complete LibreOffice Windows installer. The same build can be started manually with the **Build Windows Installer** GitHub Actions workflow.
 
 Before distributing the application, review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). In particular, PyMuPDF is AGPLv3 or commercially licensed, so distribution must comply with the AGPL or use an appropriate commercial license.
@@ -64,7 +76,7 @@ The output is `executables/Guide Comparison.app`. The complete LibreOffice app i
 3. Comparison starts automatically once both documents are present.
 4. Drop a replacement on either side to compare again automatically.
 
-Use **Swap OLD ↔ NEW** if the versions were reversed. **Clear** removes a document from the comparison but never deletes or alters the source file.
+Use **Swap OLD ↔ NEW** if the versions were reversed. **전체 페이지 보기** toggles from paired changed pages to the complete documents; **변경점 페이지 보기** returns to the paired change view. **Clear** removes a document from the comparison but never deletes or alters the source file.
 
 ## Highlight meaning
 
@@ -78,7 +90,7 @@ Use **Swap OLD ↔ NEW** if the versions were reversed. **Clear** removes a docu
 - Drag or wheel directly over an OLD page to move only OLD.
 - Drag or wheel directly over a NEW page to move only NEW.
 - Drag or wheel over the gray page margins or center gutter to move both sides.
-- Use the ↑/↓ buttons below **Differences** to move to the previous or next changed page.
+- Use the ↑/↓ buttons below **변경점** to move to the previous or next changed page.
 - Multiple highlights on the same page count as one difference target.
 - Navigation wraps between the first and last changed pages.
 
